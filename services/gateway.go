@@ -41,6 +41,13 @@ func createOrder(w http.ResponseWriter, r *http.Request) {
 
 // i want to add many traces sah
 func verfiy(order OrderRequest) bool {
-
+	if order.CustomerID < 0 {
+		return false // maybe here be more precise by saying the exact error
+	}
+	for i, item := range order.Items {
+		if item.Qty <= 0 {
+			return false // maybe here be more precise by saying the exact error
+		}
+	}
 	return true
 }
