@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/go-chi/chi"
 )
@@ -26,7 +27,11 @@ func main() {
 
 	r.Post("/orders", createOrder)
 	r.Get("/orders/{id}", getOrder)
-	http.ListenAndServe(":8080", r)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	http.ListenAndServe(":"+port, r) // todo: change the port for the container
 }
 func getOrder(w http.ResponseWriter, r *http.Request) {
 	// code that handles GET /orders/{id}
@@ -57,10 +62,11 @@ func createOrder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	var ordersServiceURL = os.Getenv("ORDERS_SERVICE_URL")
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		"http://orders:8080/orders",
+		ordersServiceURL+"/orders",
 		bytes.NewReader(body),
 	)
 	if err != nil {

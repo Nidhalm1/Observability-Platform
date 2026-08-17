@@ -1,101 +1,27 @@
-name: obs-platform
-
-# Run from this directory:
-#   cd deploy/compose
-#   docker compose up -d
-#
-# That starts Postgres AND applies the migrations automatically -- you do not
-# need to install the `migrate` CLI on your laptop, the container has it.
-
 services:
   postgres:
-    image: postgres:16-alpine
-    container_name: obs-postgres
+    image: postgres:16 
     environment:
       POSTGRES_USER: obs
       POSTGRES_PASSWORD: obs
       POSTGRES_DB: obs
+
     ports:
-      # left = your laptop, right = inside the container.
-      # This line is the ONLY reason localhost:5432 works from Windows.
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      # Without this, migrate starts before Postgres accepts connections and fails.
-      test: ["CMD-SHELL", "pg_isready -U obs -d obs"]
-      interval: 2s
-      timeout: 3s
-      retries: 15
-    # Fault 3 must be YOUR Go pool starving (SetMaxOpenConns(3)), not Postgres
-    # refusing connections. Keep this high so the bottleneck stays in your app.
-    command: ["postgres", "-c", "max_connections=100"]
+      - postgres_data:/var/lib/postgresql/data
 
-  migrate:
-    image: migrate/migrate:v4.17.1
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      
+    ports:
+      - "5050:80"
     depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ../../db/migrations:/migrations:ro
-    # NOTE: host is `postgres`, NOT localhost. Inside the Docker network,
-    # containers reach each other by service name. localhost inside a container
-    # means that container itself.
-    command:
-      [
-        "-path=/migrations",
-        "-database=postgres://obs:obs@postgres:5432/obs?sslmode=disable",
-        "up",
-      ]
-    restart: on-failure
-
-  # ---------------------------------------------------------------------------
-  # YOUR THREE SERVICES -- Phase 1, your job.
-  #
-  # Uncomment a block once that service has a `package main` + Dockerfile.
-  # Right now services/*.go are `package services` with no main(), so these
-  # would fail to build.
-  #
-  # Ports: gateway 8080 (public), orders 8081, inventory 8082.
-  # Only gateway needs a `ports:` mapping -- the other two are reachable inside
-  # the Docker network and should NOT be exposed to your laptop.
-  # ---------------------------------------------------------------------------
-
-  # gateway:
-  #   build:
-  #     context: ../..
-  #     dockerfile: services/gateway/Dockerfile
-  #   environment:
-  #     PORT: "8080"
-  #     ORDERS_URL: "http://orders:8081"
-  #   ports:
-  #     - "8080:8080"
-  #   depends_on: [orders]
-
-  # orders:
-  #   build:
-  #     context: ../..
-  #     dockerfile: services/orders/Dockerfile
-  #   environment:
-  #     PORT: "8081"
-  #     INVENTORY_URL: "http://inventory:8082"
-  #     DATABASE_URL: "postgres://obs:obs@postgres:5432/obs?sslmode=disable"
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     migrate:
-  #       condition: service_completed_successfully
-
-  # inventory:
-  #   build:
-  #     context: ../..
-  #     dockerfile: services/inventory/Dockerfile
-  #   environment:
-  #     PORT: "8082"
-  #     DATABASE_URL: "postgres://obs:obs@postgres:5432/obs?sslmode=disable"
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-
+      - postgres
 volumes:
-  pgdata:
+  postgres_data:
+
+

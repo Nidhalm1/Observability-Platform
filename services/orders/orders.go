@@ -1,8 +1,10 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -12,8 +14,9 @@ import (
 )
 
 type Item struct {
-	SKU string `json:"sku"`
-	Qty int    `json:"qty"`
+	SKU   string `json:"sku"`
+	Qty   int    `json:"qty"`
+	Price int    `json:"price"` // for the messages received from the inventory service
 }
 
 type OrderRequest struct {
@@ -40,7 +43,12 @@ func main() {
 	r := chi.NewRouter()
 	r.Post("/orders", server.createOrder)
 	r.Get("/orders/{id}", server.getOrder)
-	http.ListenAndServe(":8080", r)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	http.ListenAndServe(":"+port, r) // listen all interrface , so in container we have specilai interface
+	defer server.pool.Close()
 }
 
 func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
@@ -64,13 +72,38 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO orders (customer_id) VALUES ($1)`,
-		order.CustomerID,
+		`INSERT INTO orders (customer_id, status) VALUES ($1, $2)`,
+		order.CustomerID, "pending",
 	)
+	// if dosnt exist in my table then
+
+	//send inventory
+
+	body, err := json.Marshal(order)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	var inventoryServiceURL = os.Getenv("INVENTORY_SERVICE_URL")
+	req, err := http.NewRequestWithContext(ctx, "POST", inventoryServiceURL+"/check", bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "database error", 500)
 		return
 	}
-
-	defer s.pool.Close()
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "inventory service unavailable", 503)
+		return
+	}
+	defer resp.Body.Close()
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
+
+//todo add a call when a client can cancel an order if note confirmed
+//todo add a time out see the paper
+
+//todo see if he answers mee the quantité of each item if its is available and add only those are available
+//but he reponds me with the same struct with the real available quantity?
+//update in the table if confiremed or partialy confirmed or not confirmed and send the status to the client

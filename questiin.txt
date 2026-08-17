@@ -1,0 +1,7 @@
+but if in diffrent machine how will it works
+
+
+read chatgpt the las t messages 
+
+
+the docker yaml is on every machines ? 
