@@ -3,44 +3,68 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi"
+	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/Nidhalm1/Observability-Platform/internal/telemetry"
 )
+
+// A DB call with no deadline inherits only the client's patience. Bound it here
+// so a slow query surfaces as a fast error instead of a hung goroutine.
+const dbTimeout = 2 * time.Second
 
 type server struct {
 	// db connection pool
 	pool *pgxpool.Pool
 }
+
 type Item struct {
 	SKU   string `json:"sku"`
 	Qty   int    `json:"qty"`
 	Price int    `json:"price"`
 }
+
 type OrderRequest struct {
 	CustomerID int    `json:"customer_id"`
 	Items      []Item `json:"items"`
 }
 
+type StockResponse struct {
+	SKU       string `json:"sku"`
+	Warehouse string `json:"warehouse"`
+	Quantity  int    `json:"quantity"`
+	Reserved  int    `json:"reserved"`
+	Price     int    `json:"unit_price_cents"`
+}
+
 func main() {
-	// entry point
-	// all of them listen same port ?
 	ctx := context.Background()
-	var databaseURL = os.Getenv("DATABASE_URL")
-	server := &server{}
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is not set")
+	}
+
+	s := &server{}
 	var err error
-	server.pool, err = pgxpool.Connect(ctx, databaseURL)
+	s.pool, err = pgxpool.Connect(ctx, databaseURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	r := chi.NewRouter()
-	r.Use(Metrics("inventory"))  
-	r.Post("/check", server.checkOrder)
+	r.Use(telemetry.Metrics("inventory"))
+	r.Post("/check", s.checkOrder)
+	r.Get("/inventory/{sku}", s.getStock)
 	r.Handle("/metrics", promhttp.Handler())
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -48,8 +72,39 @@ func main() {
 	// The pool lives for the whole process. A `defer pool.Close()` here would be
 	// dead code twice over: it sat after a blocking call, and log.Fatal exits via
 	// os.Exit, which skips defers.
+	log.Printf("inventory listening on :%s", port)
 	// listen on all interfaces, so the container is reachable from outside
 	log.Fatal(http.ListenAndServe(":"+port, r))
+}
+
+// getStock is the read-only view of a SKU. Same unindexed WHERE as checkOrder,
+// but without the write -- the cleanest endpoint to point k6 at when
+// demonstrating Fault 1.
+func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
+	defer cancel()
+
+	var out StockResponse
+	// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1.
+	err := s.pool.QueryRow(ctx,
+		`SELECT sku, warehouse, quantity, reserved, unit_price_cents
+		   FROM inventory
+		  WHERE sku = $1`,
+		chi.URLParam(r, "sku"),
+	).Scan(&out.SKU, &out.Warehouse, &out.Quantity, &out.Reserved, &out.Price)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		http.Error(w, "unknown sku", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("inventory: get stock: %v", err)
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
 }
 
 func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +116,7 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+
 	for i, item := range order.Items {
 		var granted int
 		var price int
@@ -76,8 +132,9 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 		// in a single trip. LEAST() handles partial fulfilment.
 		//
 		// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1.
+		dbCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 		err := s.pool.QueryRow(
-			ctx,
+			dbCtx,
 			`WITH a AS (
                  SELECT id, quantity - reserved AS available, unit_price_cents
                  FROM inventory
@@ -92,11 +149,14 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 			item.SKU,
 			item.Qty,
 		).Scan(&granted, &price)
+		cancel()
 
 		if err != nil {
-			// no rows = unknown SKU; anything else = real DB error
+			// no rows = unknown SKU; anything else = a real DB error. Both are
+			// reported to the caller as -1, but only one of them is worth a log
+			// line at ERROR once Phase 3 adds levels.
 			log.Printf("inventory: reserve %s: %v", item.SKU, err)
-			order.Items[i] = Item{item.SKU, -1, 0} // -1 for error
+			order.Items[i] = Item{SKU: item.SKU, Qty: -1, Price: 0}
 			continue
 		}
 
@@ -109,9 +169,10 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 			Price: price,
 		}
 	}
-	s.sendOrder(w, order)
 
+	s.sendOrder(w, order)
 }
+
 func (s *server) sendOrder(w http.ResponseWriter, order OrderRequest) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

@@ -1,66 +1,102 @@
+name: obs-platform
+
 services:
   postgres:
-    image: postgres:16 
+    image: postgres:16
     environment:
       POSTGRES_USER: obs
       POSTGRES_PASSWORD: obs
       POSTGRES_DB: obs
-
     ports:
       - "5052:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-
+      # Applied once, on a FRESH data dir, in filename order. Only the .up.sql
+      # files are mounted: mounting the whole directory would also run the
+      # .down.sql files, and "down" sorts before "up".
+      # To re-apply after editing them: docker compose down -v
+      - ../../db/migrations/000001_init_schema.up.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ../../db/migrations/000002_seed_inventory.up.sql:/docker-entrypoint-initdb.d/02_seed_inventory.sql:ro
+      - ../../db/migrations/000003_seed_orders.up.sql:/docker-entrypoint-initdb.d/03_seed_orders.sql:ro
+    healthcheck:
+      # -h 127.0.0.1 forces TCP. During initdb, Postgres listens on the unix
+      # socket only -- a socket check reports healthy while the 200k-row seed is
+      # still running, and the services start against empty tables.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U obs -d obs"]
+      interval: 5s
+      timeout: 3s
+      retries: 30 # 30 check if 30 timout then the service is unhealthy. 
   pgadmin:
     image: dpage/pgadmin4
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@example.com
       PGADMIN_DEFAULT_PASSWORD: admin
-      
     ports:
       - "5051:80"
     depends_on:
       - postgres
 
-  orders:
-    environment:
-      DATABASE_URL: postgres://obs:obs@postgres:5432/obs?sslmode=disable
-      PORT: 8080
-    ports:
-      - "5049:8080"
-    depends_on:
-      - postgres
-
   inventory:
+    build:
+      context: ../..
+      args:
+        SERVICE: inventory
     environment:
       DATABASE_URL: postgres://obs:obs@postgres:5432/obs?sslmode=disable
       PORT: 8080
     ports:
       - "5048:8080"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
-  gateway:
+  orders:
+    build:
+      context: ../..
+      args:
+        SERVICE: orders
     environment:
       DATABASE_URL: postgres://obs:obs@postgres:5432/obs?sslmode=disable
+      INVENTORY_SERVICE_URL: http://inventory:8080
+      PORT: 8080
+    ports:
+      - "5049:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inventory:
+        condition: service_started
+
+  # No DATABASE_URL: the gateway has no database. It validates and routes.
+  gateway:
+    build:
+      context: ../..
+      args:
+        SERVICE: gateway
+    environment:
+      ORDERS_SERVICE_URL: http://orders:8080
       PORT: 8080
     ports:
       - "5047:8080"
     depends_on:
-      - orders
+      orders:
+        condition: service_started
 
   prometheus:
     image: prom/prometheus:latest
     command:
+      # Default retention is 15d. A 30-day error budget over 15 days of data
+      # silently computes over whatever exists and looks fine (Phase 14).
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=45d
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prom-data:/prometheus
     ports:
       - "9090:9090"
+    depends_on:
+      - gateway
 
 volumes:
   postgres_data:
   prom-data:
-

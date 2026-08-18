@@ -1,7 +1,10 @@
 but if in diffrent machine how will it works
 
 
-read chatgpt the las t messages 
-
-
 the docker yaml is on every machines ? 
+
+
+//understand this and try at home : 
+# Rate sum by (service) (rate(http_requests_total[5m])) # 
+Error ratio sum by (service) (rate(http_requests_total{status=~"5.."}[5m])) / sum by (service) (rate(http_requests_total[5m])) #
+ Duration p99 histogram_quantile(0.99, sum by (le, service, route) (rate(http_request_duration_seconds_bucket[5m])))
