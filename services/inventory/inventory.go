@@ -1,4 +1,4 @@
-package services
+package main
 
 import (
 	"context"
@@ -38,13 +38,18 @@ func main() {
 	}
 
 	r := chi.NewRouter()
+	r.Use(Metrics("inventory"))  
 	r.Post("/check", server.checkOrder)
+	r.Handle("/metrics", promhttp.Handler())
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	http.ListenAndServe(":"+port, r) // listen all interrface , so in container we have specilai interface
-	defer server.pool.Close()
+	// The pool lives for the whole process. A `defer pool.Close()` here would be
+	// dead code twice over: it sat after a blocking call, and log.Fatal exits via
+	// os.Exit, which skips defers.
+	// listen on all interfaces, so the container is reachable from outside
+	log.Fatal(http.ListenAndServe(":"+port, r))
 }
 
 func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
@@ -57,56 +62,52 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i, item := range order.Items {
-		var quantity int
-		var reserved int
+		var granted int
 		var price int
 
+		// One atomic statement instead of SELECT-then-UPDATE.
+		//
+		// The old version read `reserved`, then wrote it in a second round trip:
+		// two concurrent orders for the same SKU both read the same value and
+		// both succeeded, so stock was oversold (lost update).
+		//
+		// The CTE takes a row lock and captures available-BEFORE, which RETURNING
+		// can still read via `a` -- that is what makes the granted amount knowable
+		// in a single trip. LEAST() handles partial fulfilment.
+		//
+		// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1.
 		err := s.pool.QueryRow(
 			ctx,
-			`SELECT quantity , reserved , unit_price_cents
-         FROM inventory
-         WHERE sku = $1`,
+			`WITH a AS (
+                 SELECT id, quantity - reserved AS available, unit_price_cents
+                 FROM inventory
+                 WHERE sku = $1
+                 FOR UPDATE
+             )
+             UPDATE inventory i
+             SET reserved = i.reserved + LEAST($2, a.available)
+             FROM a
+             WHERE i.id = a.id
+             RETURNING LEAST($2, a.available), a.unit_price_cents`,
 			item.SKU,
-		).Scan(&quantity, &reserved, &price)
+			item.Qty,
+		).Scan(&granted, &price)
 
 		if err != nil {
+			// no rows = unknown SKU; anything else = real DB error
+			log.Printf("inventory: reserve %s: %v", item.SKU, err)
 			order.Items[i] = Item{item.SKU, -1, 0} // -1 for error
-		}
-		available := quantity - reserved
-		newStock := 0
-		if available < item.Qty {
-			newStock = available
-			_, err = s.pool.Exec(
-				ctx,
-				`UPDATE inventory
-             SET reserved = quantity
-             WHERE sku = $1`,
-				item.SKU,
-			)
-			if err != nil {
-				order.Items[i] = Item{item.SKU, -1, 0}
-			}
 			continue
-		} else {
-			newStock = item.Qty
-			_, err = s.pool.Exec(
-				ctx,
-				`UPDATE inventory
-             SET reserved = reserved + $2
-             WHERE sku = $1`,
-				item.SKU,
-				item.Qty,
-			)
-			if err != nil {
-				order.Items[i] = Item{item.SKU, -1, 0}
-			}
 		}
-		nItem := Item{
+
+		// granted < item.Qty means partial. The old code `continue`d on this path
+		// without writing order.Items[i], so the caller got its own requested
+		// quantity back and believed the reservation was full.
+		order.Items[i] = Item{
 			SKU:   item.SKU,
-			Qty:   newStock,
+			Qty:   granted,
 			Price: price,
 		}
-		order.Items[i] = nItem
 	}
 	s.sendOrder(w, order)
 

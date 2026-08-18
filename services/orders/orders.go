@@ -1,15 +1,16 @@
-package services
+package main
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi"
+	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 )
 
@@ -28,6 +29,10 @@ type server struct {
 	pool *pgxpool.Pool
 }
 
+// http.DefaultClient has NO timeout -- it waits forever, so a slow inventory
+// takes orders down with it. This is Fault 4; make it deliberate, not default.
+var inventoryClient = &http.Client{Timeout: 2 * time.Second}
+
 func main() {
 	// entry point
 	// all of them listen same port ?
@@ -39,16 +44,22 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	
 	r := chi.NewRouter()
+	r.Use(Metrics("orders"))  
 	r.Post("/orders", server.createOrder)
 	r.Get("/orders/{id}", server.getOrder)
+	r.Handle("/metrics", promhttp.Handler())
+	
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	http.ListenAndServe(":"+port, r) // listen all interrface , so in container we have specilai interface
-	defer server.pool.Close()
+	// The pool lives for the whole process. A `defer pool.Close()` here would be
+	// dead code twice over: it sat after a blocking call, and log.Fatal exits via
+	// os.Exit, which skips defers.
+	// listen on all interfaces, so the container is reachable from outside
+	log.Fatal(http.ListenAndServe(":"+port, r))
 }
 
 func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
@@ -71,12 +82,18 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	_, err = s.pool.Exec(ctx,
-		`INSERT INTO orders (customer_id, status) VALUES ($1, $2)`,
-		order.CustomerID, "pending",
-	)
+	var orderID int
+	err = s.pool.QueryRow(ctx,
+    `INSERT INTO orders (customer_id, status)
+     VALUES ($1, $2::order_status)
+     RETURNING id`,
+    order.CustomerID, "pending",
+	).Scan(&orderID)
 	// if dosnt exist in my table then
-
+	if err != nil {
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
 	//send inventory
 
 	body, err := json.Marshal(order)
@@ -91,14 +108,82 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := inventoryClient.Do(req)
 	if err != nil {
 		http.Error(w, "inventory service unavailable", 503)
 		return
 	}
-	defer resp.Body.Close()
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	defer resp.Body.Close() // AFTER the err check: on error resp is nil -> panic
+	var inventoryResponse OrderRequest
+	err = json.NewDecoder(resp.Body).Decode(&inventoryResponse)
+	if err != nil {
+		http.Error(w, "invalid inventory response", http.StatusInternalServerError)
+		return
+	}
+	
+	var same bool
+	same = true
+	rows := make([][]any, 0, len(inventoryResponse.Items))
+	for i, item := range inventoryResponse.Items {
+		// bounds check: inventory is another service, its reply length is not ours to trust
+		if i >= len(order.Items) || order.Items[i].Qty != item.Qty {
+			same = false
+		}
+		// Skip non-positive quantities: 0 = out of stock, -1 = inventory error.
+		// order_items has CHECK (qty > 0), so copying these in fails the whole
+		// CopyFrom and turns every out-of-stock SKU into a 500.
+		if item.Qty <= 0 {
+			continue
+		}
+		rows = append(rows, []any{
+			orderID,
+			item.SKU,
+			item.Qty,
+			item.Price,
+		})
+	}
+	if len(inventoryResponse.Items) != len(order.Items) {
+		same = false
+	}
+	// Exec returns (CommandTag, error) -- two values.
+	if same {
+		_, err = s.pool.Exec(ctx,
+			`UPDATE orders
+			SET status = $2::order_status
+			WHERE id = $1`,
+			orderID, "confirmed",
+		)
+	} else {
+		_, err = s.pool.Exec(ctx,
+			`UPDATE orders
+			SET status = $2::order_status
+			WHERE id = $1`,
+			orderID, "partially confirmed",
+		)
+	}
+	if err != nil {
+		http.Error(w, "failed to update order status", http.StatusInternalServerError)
+		return
+	}
+	
+	if len(rows) > 0 {
+		_, err = s.pool.CopyFrom(
+			ctx,
+			pgx.Identifier{"order_items"},
+			[]string{"order_id", "sku", "qty", "unit_price_cents"},
+			pgx.CopyFromRows(rows),
+		)
+
+		if err != nil {
+			http.Error(w, "failed to insert order items", http.StatusInternalServerError)
+			return
+		}
+	}
+	// resp.Body is already drained by the decoder above, so io.Copy would send
+	// nothing. Encode the struct we decoded instead.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(inventoryResponse)
 }
 
 //todo add a call when a client can cancel an order if note confirmed

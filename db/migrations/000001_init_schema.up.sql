@@ -8,7 +8,7 @@
 
 BEGIN;
 
-CREATE TYPE order_status AS ENUM ('pending', 'confirmed', 'rejected', 'cancelled');
+CREATE TYPE order_status AS ENUM ('pending', 'confirmed', 'rejected', 'cancelled', 'partially_confirmed');
 
 CREATE TABLE inventory (
     id               BIGSERIAL   PRIMARY KEY,

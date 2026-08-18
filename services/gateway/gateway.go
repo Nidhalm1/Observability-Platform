@@ -1,11 +1,13 @@
-package services
+package main
 
 import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi"
 )
@@ -21,17 +23,24 @@ type OrderRequest struct {
 	Items      []Item `json:"items"`
 }
 
+// http.DefaultClient has NO timeout -- it waits forever, so a slow orders
+// service takes the gateway down with it.
+var ordersClient = &http.Client{Timeout: 3 * time.Second}
+
 func main() {
 	// entry point
 	r := chi.NewRouter()
 
-	r.Post("/orders", createOrder)
-	r.Get("/orders/{id}", getOrder)
+	r := chi.NewRouter()
+	r.Use(Metrics("orders"))  
+	r.Post("/orders", server.createOrder)
+	r.Get("/orders/{id}", server.getOrder)
+	r.Handle("/metrics", promhttp.Handler())
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	http.ListenAndServe(":"+port, r) // todo: change the port for the container
+	log.Fatal(http.ListenAndServe(":"+port, r)) // todo: change the port for the container
 }
 func getOrder(w http.ResponseWriter, r *http.Request) {
 	// code that handles GET /orders/{id}
@@ -74,7 +83,7 @@ func createOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := ordersClient.Do(req)
 	if err != nil {
 		http.Error(w, "orders service unavailable", 503)
 		return
