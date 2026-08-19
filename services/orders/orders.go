@@ -82,6 +82,7 @@ func main() {
 	s.pool, err = pgxpool.Connect(ctx, databaseURL)
 	if err != nil {
 		logger.Error("failed to connect to database", "error", err)
+		os.Exit(1)
 	}
 
 	r := chi.NewRouter()
@@ -97,9 +98,12 @@ func main() {
 	// The pool lives for the whole process. A `defer pool.Close()` here would be
 	// dead code twice over: it sat after a blocking call, and log.Fatal exits via
 	// os.Exit, which skips defers.
-	logger.Printf("orders listening on :%s, inventory at %s", port, inventoryURL)
+	logger.Info("orders listening", "port", port, "inventory_url", inventoryURL)
 	// listen on all interfaces, so the container is reachable from outside
-	logger.Error(http.ListenAndServe(":"+port, r))
+	if err := http.ListenAndServe(":"+port, r); err != nil {
+		logger.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
 }
 
 // getOrder reads an order and its line items in TWO queries: one for the
@@ -131,7 +135,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("orders: get order %d: %v", id, err)
+		s.logger.Error("get order failed", "order_id", id, "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -144,7 +148,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 		id,
 	)
 	if err != nil {
-		log.Printf("orders: get items %d: %v", id, err)
+		s.logger.Error("get items failed", "order_id", id, "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -154,7 +158,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var it Item
 		if err := rows.Scan(&it.SKU, &it.Qty, &it.Price); err != nil {
-			log.Printf("orders: scan item %d: %v", id, err)
+			s.logger.Error("scan item failed", "order_id", id, "error", err)
 			http.Error(w, "database error", http.StatusInternalServerError)
 			return
 		}
@@ -163,7 +167,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	// rows.Err() reports failures that happen mid-iteration, which the loop
 	// above cannot see. Skipping it silently truncates result sets.
 	if err := rows.Err(); err != nil {
-		log.Printf("orders: iterate items %d: %v", id, err)
+		s.logger.Error("iterate items failed", "order_id", id, "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -201,7 +205,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	).Scan(&orderID, &createdAt)
 	cancel()
 	if err != nil {
-		log.Printf("orders: insert order: %v", err)
+		s.logger.Error("insert order failed", "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -224,7 +228,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		log.Printf("orders: call inventory: %v", err)
+		s.logger.Error("call inventory failed", "error", err)
 		http.Error(w, "inventory service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -282,7 +286,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	)
 	cancel()
 	if err != nil {
-		log.Printf("orders: update order %d: %v", orderID, err)
+		s.logger.Error("update order failed", "order_id", orderID, "error", err)
 		http.Error(w, "failed to update order status", http.StatusInternalServerError)
 		return
 	}
@@ -297,7 +301,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 		)
 		cancel()
 		if err != nil {
-			log.Printf("orders: insert items for %d: %v", orderID, err)
+			s.logger.Error("insert items failed", "order_id", orderID, "error", err)
 			http.Error(w, "failed to insert order items", http.StatusInternalServerError)
 			return
 		}

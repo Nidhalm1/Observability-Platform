@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -29,18 +29,24 @@ type OrderRequest struct {
 type server struct {
 	ordersURL string
 	client    *http.Client
+	logger    *slog.Logger
 }
 
 func main() {
+	logger := telemetry.SetupLogger("gateway")
+
 	ordersURL := os.Getenv("ORDERS_SERVICE_URL")
 	if ordersURL == "" {
 		// Fail at startup, not per-request. An empty URL turns every call into
-		// a confusing 500 that looks like an orders bug.
-		log.Fatal("ORDERS_SERVICE_URL is not set")
+		// a confusing 500 that looks like an orders bug. slog has no Fatal, so
+		// the exit is explicit.
+		logger.Error("ORDERS_SERVICE_URL is not set")
+		os.Exit(1)
 	}
 
 	s := &server{
 		ordersURL: ordersURL,
+		logger:    logger,
 		// http.DefaultClient has NO timeout -- it waits forever, so a slow
 		// orders service takes the gateway down with it.
 		client: &http.Client{Timeout: 3 * time.Second},
@@ -56,9 +62,12 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("gateway listening on :%s, orders at %s", port, ordersURL)
+	logger.Info("gateway listening", "port", port, "orders_url", ordersURL)
 	// listen on all interfaces, so the container is reachable from outside
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	if err := http.ListenAndServe(":"+port, r); err != nil {
+		logger.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
 }
 
 func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
@@ -66,10 +75,12 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 
 	var order OrderRequest
 	if err := json.NewDecoder(r.Body).Decode(&order); err != nil {
+		s.logger.Warn("invalid JSON", "error", err)
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 	if !verify(order) {
+		s.logger.Warn("invalid order", "customer_id", order.CustomerID, "items", len(order.Items))
 		http.Error(w, "invalid order", http.StatusBadRequest)
 		return
 	}
@@ -100,6 +111,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	if _, err := strconv.ParseInt(id, 10, 64); err != nil {
 		// Validate before forwarding: keeps junk out of the downstream service
 		// and gives the caller a 400 instead of a 404 from two hops away.
+		s.logger.Warn("invalid order id", "id", id)
 		http.Error(w, "invalid order id", http.StatusBadRequest)
 		return
 	}
@@ -127,6 +139,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 func (s *server) forward(w http.ResponseWriter, req *http.Request) {
 	resp, err := s.client.Do(req)
 	if err != nil {
+		s.logger.Error("call orders failed", "url", req.URL.String(), "error", err)
 		http.Error(w, "orders service unavailable", http.StatusServiceUnavailable)
 		return
 	}

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -23,7 +23,8 @@ const dbTimeout = 2 * time.Second
 
 type server struct {
 	// db connection pool
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	logger *slog.Logger
 }
 
 type Item struct {
@@ -47,16 +48,23 @@ type StockResponse struct {
 
 func main() {
 	ctx := context.Background()
+
+	logger := telemetry.SetupLogger("inventory")
+
+	// Fail at startup, not per-request: slog has no Fatal, so the exit is
+	// explicit. os.Exit(1) keeps the container-restart behaviour log.Fatal had.
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		log.Fatal("DATABASE_URL is not set")
+		logger.Error("DATABASE_URL is not set")
+		os.Exit(1)
 	}
 
-	s := &server{}
+	s := &server{logger: logger}
 	var err error
 	s.pool, err = pgxpool.Connect(ctx, databaseURL)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("failed to connect to database", "error", err)
+		os.Exit(1)
 	}
 
 	r := chi.NewRouter()
@@ -72,9 +80,12 @@ func main() {
 	// The pool lives for the whole process. A `defer pool.Close()` here would be
 	// dead code twice over: it sat after a blocking call, and log.Fatal exits via
 	// os.Exit, which skips defers.
-	log.Printf("inventory listening on :%s", port)
+	logger.Info("inventory listening", "port", port)
 	// listen on all interfaces, so the container is reachable from outside
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	if err := http.ListenAndServe(":"+port, r); err != nil {
+		logger.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
 }
 
 // getStock is the read-only view of a SKU. Same unindexed WHERE as checkOrder,
@@ -94,11 +105,12 @@ func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
 	).Scan(&out.SKU, &out.Warehouse, &out.Quantity, &out.Reserved, &out.Price)
 
 	if errors.Is(err, pgx.ErrNoRows) {
+		s.logger.Warn("unknown sku", "sku", chi.URLParam(r, "sku"))
 		http.Error(w, "unknown sku", http.StatusNotFound)
 		return
 	}
 	if err != nil {
-		log.Printf("inventory: get stock: %v", err)
+		s.logger.Error("get stock failed", "sku", chi.URLParam(r, "sku"), "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -113,6 +125,7 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 	var order OrderRequest
 	err := json.NewDecoder(r.Body).Decode(&order)
 	if err != nil {
+		s.logger.Warn("invalid JSON", "error", err)
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -155,7 +168,7 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 			// no rows = unknown SKU; anything else = a real DB error. Both are
 			// reported to the caller as -1, but only one of them is worth a log
 			// line at ERROR once Phase 3 adds levels.
-			log.Printf("inventory: reserve %s: %v", item.SKU, err)
+			s.logger.Error("reserve failed", "sku", item.SKU, "qty", item.Qty, "error", err)
 			order.Items[i] = Item{SKU: item.SKU, Qty: -1, Price: 0}
 			continue
 		}
