@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -48,22 +48,30 @@ type server struct {
 	pool         *pgxpool.Pool
 	inventoryURL string
 	client       *http.Client
+	logger       *slog.Logger
 }
 
 func main() {
 	ctx := context.Background()
 
+	logger := telemetry.SetupLogger("orders")
+
+	// Fail at startup, not per-request: slog has no Fatal, so the exit is
+	// explicit. os.Exit(1) keeps the container-restart behaviour log.Fatal had.
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		log.Fatal("DATABASE_URL is not set")
+		logger.Error("DATABASE_URL is not set")
+		os.Exit(1)
 	}
 	inventoryURL := os.Getenv("INVENTORY_SERVICE_URL")
 	if inventoryURL == "" {
-		log.Fatal("INVENTORY_SERVICE_URL is not set")
+		logger.Error("INVENTORY_SERVICE_URL is not set")
+		os.Exit(1)
 	}
 
 	s := &server{
 		inventoryURL: inventoryURL,
+		logger:       logger,
 		// http.DefaultClient has NO timeout -- it waits forever, so a slow
 		// inventory takes orders down with it. This is Fault 4; removing the
 		// timeout must be a deliberate act, not the default.
@@ -73,7 +81,7 @@ func main() {
 	var err error
 	s.pool, err = pgxpool.Connect(ctx, databaseURL)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("failed to connect to database", "error", err)
 	}
 
 	r := chi.NewRouter()
@@ -89,9 +97,9 @@ func main() {
 	// The pool lives for the whole process. A `defer pool.Close()` here would be
 	// dead code twice over: it sat after a blocking call, and log.Fatal exits via
 	// os.Exit, which skips defers.
-	log.Printf("orders listening on :%s, inventory at %s", port, inventoryURL)
+	logger.Printf("orders listening on :%s, inventory at %s", port, inventoryURL)
 	// listen on all interfaces, so the container is reachable from outside
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	logger.Error(http.ListenAndServe(":"+port, r))
 }
 
 // getOrder reads an order and its line items in TWO queries: one for the
@@ -170,12 +178,14 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	var order OrderRequest
 	err := json.NewDecoder(r.Body).Decode(&order)
 	if err != nil {
+		s.logger.Warn("invalid JSON", "error", err)
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 	// The gateway validates too. Orders is directly reachable on its own port,
 	// so it cannot assume it was called through the gateway.
 	if order.CustomerID <= 0 || len(order.Items) == 0 {
+		s.logger.Warn("invalid order", "customer_id", order.CustomerID, "items", len(order.Items))
 		http.Error(w, "invalid order", http.StatusBadRequest)
 		return
 	}
