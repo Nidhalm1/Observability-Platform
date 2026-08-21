@@ -3,18 +3,27 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
+	"github.com/XSAM/otelsql"
 	"github.com/go-chi/chi"
-	"github.com/jackc/pgx/v4"
-	"github.com/jackc/pgx/v4/pgxpool"
+
+	// Registers the "pgx/v4" driver with database/sql. Imported for that side
+	// effect alone -- nothing in this file calls into it directly.
+	_ "github.com/jackc/pgx/v4/stdlib"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
 	"github.com/Nidhalm1/Observability-Platform/internal/telemetry"
 )
@@ -44,49 +53,86 @@ type OrderResponse struct {
 }
 
 type server struct {
-	// db connection pool
-	pool         *pgxpool.Pool
+	db           *sql.DB
 	inventoryURL string
 	client       *http.Client
 	logger       *slog.Logger
 }
 
 func main() {
-	ctx := context.Background()
+	exitCode := 0
+	//garantee to us to flutsh before quit
+	defer func() { os.Exit(exitCode) }()
 
 	logger := telemetry.SetupLogger("orders")
+	//when he get a signal from the contain er do not stop directrly
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// Fail at startup, not per-request: slog has no Fatal, so the exit is
-	// explicit. os.Exit(1) keeps the container-restart behaviour log.Fatal had.
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		logger.Error("DATABASE_URL is not set")
-		os.Exit(1)
+		exitCode = 1
+		return
 	}
 	inventoryURL := os.Getenv("INVENTORY_SERVICE_URL")
 	if inventoryURL == "" {
 		logger.Error("INVENTORY_SERVICE_URL is not set")
-		os.Exit(1)
+		exitCode = 1
+		return
 	}
+
+	shutdownTracing, err := telemetry.SetupTracing(ctx, "orders")
+	if err != nil {
+		logger.Error("tracing setup failed", "error", err)
+		exitCode = 1
+		return
+	}
+
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(flushCtx); err != nil {
+			logger.Error("tracing shutdown failed", "error", err)
+		}
+	}()
 
 	s := &server{
 		inventoryURL: inventoryURL,
 		logger:       logger,
-		// http.DefaultClient has NO timeout -- it waits forever, so a slow
-		// inventory takes orders down with it. This is Fault 4; removing the
-		// timeout must be a deliberate act, not the default.
-		client: &http.Client{Timeout: 2 * time.Second},
+		client:       &http.Client{Timeout: 2 * time.Second},
 	}
 
-	var err error
-	s.pool, err = pgxpool.Connect(ctx, databaseURL)
+	s.db, err = otelsql.Open("pgx/v4", databaseURL,
+		otelsql.WithAttributes(semconv.DBSystemPostgreSQL),
+		otelsql.WithSpanOptions(otelsql.SpanOptions{
+			DisableErrSkip:       true,
+			OmitConnResetSession: true,
+		}),
+	)
+	if err != nil {
+		logger.Error("failed to open database", "error", err)
+		exitCode = 1
+		return
+	}
+	defer s.db.Close()
+
+	s.db.SetMaxOpenConns(10)
+	s.db.SetMaxIdleConns(10)
+	s.db.SetConnMaxLifetime(30 * time.Minute)
+
+	pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
+	err = s.db.PingContext(pingCtx)
+	cancelPing()
 	if err != nil {
 		logger.Error("failed to connect to database", "error", err)
-		os.Exit(1)
+		exitCode = 1
+		return
 	}
 
 	r := chi.NewRouter()
 	r.Use(telemetry.Metrics("orders"))
+	r.Use(telemetry.RouteSpanName())
 	r.Post("/orders", s.createOrder)
 	r.Get("/orders/{id}", s.getOrder)
 	r.Handle("/metrics", promhttp.Handler())
@@ -95,21 +141,36 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	// The pool lives for the whole process. A `defer pool.Close()` here would be
-	// dead code twice over: it sat after a blocking call, and log.Fatal exits via
-	// os.Exit, which skips defers.
+
+	srv := &http.Server{Addr: ":" + port, Handler: telemetry.Tracing("orders", r)}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		// ErrServerClosed is what Shutdown returns on the way out. It is the
+		// success case, not a failure.
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+		}
+	}()
 	logger.Info("orders listening", "port", port, "inventory_url", inventoryURL)
-	// listen on all interfaces, so the container is reachable from outside
-	if err := http.ListenAndServe(":"+port, r); err != nil {
+
+	select {
+	case err := <-serveErr:
 		logger.Error("server stopped", "error", err)
-		os.Exit(1)
+		exitCode = 1
+		return
+	case <-ctx.Done():
+		logger.Info("shutdown signal received")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("graceful shutdown failed", "error", err)
+		exitCode = 1
 	}
 }
 
-// getOrder reads an order and its line items in TWO queries: one for the
-// header, one for all items. This is the correct baseline. Fault 2 (N+1) is
-// this same read done wrong -- a query per item -- and goes behind a flag in
-// Phase 7, so keep this version intact to compare waterfalls against.
 func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -123,14 +184,14 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	var out OrderResponse
 	// status::text because pgx cannot scan a user-defined enum OID into a
 	// string on its own.
-	err = s.pool.QueryRow(ctx,
+	err = s.db.QueryRowContext(ctx,
 		`SELECT id, customer_id, status::text, total_cents, created_at
 		   FROM orders
 		  WHERE id = $1`,
 		id,
 	).Scan(&out.ID, &out.CustomerID, &out.Status, &out.TotalCents, &out.CreatedAt)
 
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "order not found", http.StatusNotFound)
 		return
 	}
@@ -140,7 +201,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.pool.Query(ctx,
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT sku, qty, unit_price_cents
 		   FROM order_items
 		  WHERE order_id = $1
@@ -197,7 +258,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	insCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	var orderID int64
 	var createdAt time.Time
-	err = s.pool.QueryRow(insCtx,
+	err = s.db.QueryRowContext(insCtx,
 		`INSERT INTO orders (customer_id, status)
 		 VALUES ($1, $2::order_status)
 		 RETURNING id, created_at`,
@@ -278,7 +339,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	// 'partially_confirmed'. A mismatch here is an invalid-input error from
 	// Postgres, i.e. a 500 on every partial order.
 	updCtx, cancel := context.WithTimeout(ctx, dbTimeout)
-	_, err = s.pool.Exec(updCtx,
+	_, err = s.db.ExecContext(updCtx,
 		`UPDATE orders
 		    SET status = $2::order_status, total_cents = $3, updated_at = now()
 		  WHERE id = $1`,
@@ -292,13 +353,20 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(rows) > 0 {
-		copyCtx, cancel := context.WithTimeout(ctx, dbTimeout)
-		_, err = s.pool.CopyFrom(
-			copyCtx,
-			pgx.Identifier{"order_items"},
-			[]string{"order_id", "sku", "qty", "unit_price_cents"},
-			pgx.CopyFromRows(rows),
-		)
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO order_items (order_id, sku, qty, unit_price_cents) VALUES `)
+		args := make([]any, 0, len(rows)*4)
+		for i, row := range rows {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			n := i * 4
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d)", n+1, n+2, n+3, n+4)
+			args = append(args, row...)
+		}
+
+		insertCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+		_, err = s.db.ExecContext(insertCtx, sb.String(), args...)
 		cancel()
 		if err != nil {
 			s.logger.Error("insert items failed", "order_id", orderID, "error", err)
@@ -307,9 +375,6 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// resp.Body is already drained by the decoder above, so io.Copy would send
-	// nothing. Build the response from what we know instead -- and return the
-	// id, so the caller can GET /orders/{id} straight afterwards.
 	out := OrderResponse{
 		ID:         orderID,
 		CustomerID: int64(order.CustomerID),
