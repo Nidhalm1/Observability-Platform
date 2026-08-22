@@ -43,13 +43,18 @@ services:
         SERVICE: inventory
     environment:
       DATABASE_URL: postgres://obs:obs@postgres:5432/obs?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       PORT: 8080
     ports:
       - "5048:8080"
     depends_on:
       postgres:
         condition: service_healthy
-        
+    # Longer than the 10s shutdown + 5s span flush in main(), so the last batch
+    # of spans leaves the process before Docker sends SIGKILL.
+    stop_grace_period: 20s
+
+
   orders:
     build:
       context: ../..
@@ -77,12 +82,14 @@ services:
         SERVICE: gateway
     environment:
       ORDERS_SERVICE_URL: http://orders:8080
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       PORT: 8080
     ports:
       - "5047:8080"
     depends_on:
       orders:
         condition: service_started
+    stop_grace_period: 20s
 
   prometheus:
     image: prom/prometheus:latest

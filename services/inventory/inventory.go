@@ -2,17 +2,22 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/XSAM/otelsql"
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v4"
-	"github.com/jackc/pgx/v4/pgxpool"
+
+	_ "github.com/jackc/pgx/v4/stdlib"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
 	"github.com/Nidhalm1/Observability-Platform/internal/telemetry"
 )
@@ -22,8 +27,7 @@ import (
 const dbTimeout = 2 * time.Second
 
 type server struct {
-	// db connection pool
-	pool   *pgxpool.Pool
+	db     *sql.DB
 	logger *slog.Logger
 }
 
@@ -47,28 +51,71 @@ type StockResponse struct {
 }
 
 func main() {
-	ctx := context.Background()
+	exitCode := 0
+	//garantee to us to flutsh before quit
+	defer func() { os.Exit(exitCode) }()
 
 	logger := telemetry.SetupLogger("inventory")
+	//when he get a signal from the contain abort and go to ctx.done()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	// Fail at startup, not per-request: slog has no Fatal, so the exit is
-	// explicit. os.Exit(1) keeps the container-restart behaviour log.Fatal had.
+	// explicit. The deferred os.Exit(1) keeps the container-restart behaviour.
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		logger.Error("DATABASE_URL is not set")
-		os.Exit(1)
+		exitCode = 1
+		return
 	}
 
+	shutdownTracing, err := telemetry.SetupTracing(ctx, "inventory")
+	if err != nil {
+		logger.Error("tracing setup failed", "error", err)
+		exitCode = 1
+		return
+	}
+	//schedule when main ends to flush the traces and shutdown the tracer provider
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(flushCtx); err != nil {
+			logger.Error("tracing shutdown failed", "error", err)
+		}
+	}()
+
 	s := &server{logger: logger}
-	var err error
-	s.pool, err = pgxpool.Connect(ctx, databaseURL)
+
+	s.db, err = otelsql.Open("pgx/v4", databaseURL,
+		otelsql.WithAttributes(semconv.DBSystemPostgreSQL),
+		otelsql.WithSpanOptions(otelsql.SpanOptions{
+			DisableErrSkip:       true,
+			OmitConnResetSession: true,
+		}),
+	)
+	if err != nil {
+		logger.Error("failed to open database", "error", err)
+		exitCode = 1
+		return
+	}
+	defer s.db.Close()
+
+	s.db.SetMaxOpenConns(10)
+	s.db.SetMaxIdleConns(10)
+	s.db.SetConnMaxLifetime(30 * time.Minute)
+
+	pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
+	err = s.db.PingContext(pingCtx)
+	cancelPing()
 	if err != nil {
 		logger.Error("failed to connect to database", "error", err)
-		os.Exit(1)
+		exitCode = 1
+		return
 	}
 
 	r := chi.NewRouter()
 	r.Use(telemetry.Metrics("inventory"))
+	r.Use(telemetry.RouteSpanName()) // cretae same sapn name for the same method
 	r.Post("/check", s.checkOrder)
 	r.Get("/inventory/{sku}", s.getStock)
 	r.Handle("/metrics", promhttp.Handler())
@@ -77,14 +124,36 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	// The pool lives for the whole process. A `defer pool.Close()` here would be
-	// dead code twice over: it sat after a blocking call, and log.Fatal exits via
-	// os.Exit, which skips defers.
-	logger.Info("inventory listening", "port", port)
+	// telemetry.Tracing("inventory", r) for linking spans , reading traceparent ect.
+
 	// listen on all interfaces, so the container is reachable from outside
-	if err := http.ListenAndServe(":"+port, r); err != nil {
+	srv := &http.Server{Addr: ":" + port, Handler: telemetry.Tracing("inventory", r)}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		// ErrServerClosed is what Shutdown returns on the way out. It is the
+		// success case, not a failure.
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+		}
+	}()
+	logger.Info("inventory listening", "port", port)
+
+	select {
+	case err := <-serveErr:
 		logger.Error("server stopped", "error", err)
-		os.Exit(1)
+		exitCode = 1
+		return
+	case <-ctx.Done():
+		logger.Info("shutdown signal received")
+	}
+	//contex.background because maybe the firsto contexct gets direct buy sigterm
+	//wait for handle to finish and shutdown the server
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("graceful shutdown failed", "error", err)
+		exitCode = 1
 	}
 }
 
@@ -96,15 +165,16 @@ func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var out StockResponse
-	// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1.
-	err := s.pool.QueryRow(ctx,
+	// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1. The otelsql
+	// span around this query is what makes the seq scan visible in a trace.
+	err := s.db.QueryRowContext(ctx,
 		`SELECT sku, warehouse, quantity, reserved, unit_price_cents
 		   FROM inventory
 		  WHERE sku = $1`,
 		chi.URLParam(r, "sku"),
 	).Scan(&out.SKU, &out.Warehouse, &out.Quantity, &out.Reserved, &out.Price)
 
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		s.logger.Warn("unknown sku", "sku", chi.URLParam(r, "sku"))
 		http.Error(w, "unknown sku", http.StatusNotFound)
 		return
@@ -146,7 +216,7 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 		//
 		// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1.
 		dbCtx, cancel := context.WithTimeout(ctx, dbTimeout)
-		err := s.pool.QueryRow(
+		err := s.db.QueryRowContext(
 			dbCtx,
 			`WITH a AS (
                  SELECT id, quantity - reserved AS available, unit_price_cents

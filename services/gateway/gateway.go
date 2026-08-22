@@ -2,16 +2,21 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/Nidhalm1/Observability-Platform/internal/telemetry"
 )
@@ -33,7 +38,14 @@ type server struct {
 }
 
 func main() {
+	exitCode := 0
+	//garantee to us to flutsh before quit
+	defer func() { os.Exit(exitCode) }()
+
 	logger := telemetry.SetupLogger("gateway")
+	//when he get a signal from the contain abort and go to ctx.done()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	ordersURL := os.Getenv("ORDERS_SERVICE_URL")
 	if ordersURL == "" {
@@ -41,19 +53,39 @@ func main() {
 		// a confusing 500 that looks like an orders bug. slog has no Fatal, so
 		// the exit is explicit.
 		logger.Error("ORDERS_SERVICE_URL is not set")
-		os.Exit(1)
+		exitCode = 1
+		return
 	}
+
+	shutdownTracing, err := telemetry.SetupTracing(ctx, "gateway")
+	if err != nil {
+		logger.Error("tracing setup failed", "error", err)
+		exitCode = 1
+		return
+	}
+	//schedule when main ends to flush the traces and shutdown the tracer provider
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(flushCtx); err != nil {
+			logger.Error("tracing shutdown failed", "error", err)
+		}
+	}()
 
 	s := &server{
 		ordersURL: ordersURL,
 		logger:    logger,
 		// http.DefaultClient has NO timeout -- it waits forever, so a slow
 		// orders service takes the gateway down with it.
-		client: &http.Client{Timeout: 3 * time.Second},
+		client: &http.Client{
+			Timeout:   3 * time.Second,
+			Transport: otelhttp.NewTransport(http.DefaultTransport), //to send traceparent header to the orders service
+		},
 	}
 
 	r := chi.NewRouter()
 	r.Use(telemetry.Metrics("gateway"))
+	r.Use(telemetry.RouteSpanName()) // cretae same sapn name for the same method
 	r.Post("/orders", s.createOrder)
 	r.Get("/orders/{id}", s.getOrder)
 	r.Handle("/metrics", promhttp.Handler())
@@ -62,11 +94,34 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+
+	srv := &http.Server{Addr: ":" + port, Handler: telemetry.Tracing("gateway", r)}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		// ErrServerClosed is what Shutdown returns on the way out. It is the
+		// success case, not a failure.
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+		}
+	}()
 	logger.Info("gateway listening", "port", port, "orders_url", ordersURL)
-	// listen on all interfaces, so the container is reachable from outside
-	if err := http.ListenAndServe(":"+port, r); err != nil {
+
+	select {
+	case err := <-serveErr:
 		logger.Error("server stopped", "error", err)
-		os.Exit(1)
+		exitCode = 1
+		return
+	case <-ctx.Done():
+		logger.Info("shutdown signal received")
+	}
+	//contex.background because maybe the firsto contexct gets direct buy sigterm
+	//wait for handle to finish and shutdown the server
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("graceful shutdown failed", "error", err)
+		exitCode = 1
 	}
 }
 
@@ -132,10 +187,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 
 // forward sends req to the orders service and copies the response back.
 //
-// Every request built in this file uses http.NewRequestWithContext with the
-// request-scoped ctx. That is not cosmetic: in Phase 5 the context is what
-// carries the trace ID into the `traceparent` header. Using context.Background()
-// here compiles, works, and produces orphaned single-span traces.
+
 func (s *server) forward(w http.ResponseWriter, req *http.Request) {
 	resp, err := s.client.Do(req)
 	if err != nil {

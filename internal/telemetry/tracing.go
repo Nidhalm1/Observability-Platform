@@ -25,8 +25,12 @@ func SetupTracing(ctx context.Context, service string) (func(context.Context) er
 	}
 	// each span with its service name
 
+	// NewSchemaless, not NewWithAttributes(semconv.SchemaURL, ...): resource.Default()
+	// carries the SDK's own schema URL (1.43.0 as of otel v1.45.0). Merge refuses to
+	// combine two different ones, so passing semconv v1.24.0's URL here returns
+	// "conflicting Schema URL" and every service dies at startup.
 	res, err := resource.Merge(resource.Default(),
-		resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName(service)),
+		resource.NewSchemaless(semconv.ServiceName(service)),
 	)
 	if err != nil {
 		return nil, err

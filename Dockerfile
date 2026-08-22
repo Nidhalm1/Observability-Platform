@@ -3,7 +3,7 @@
 #
 #   docker build --build-arg SERVICE=orders -t obs/orders .
 
-FROM golang:1.22-alpine AS build
+FROM golang:1.25-alpine AS build
 ARG SERVICE
 WORKDIR /src
 
