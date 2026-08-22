@@ -1,0 +1,34 @@
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}#we can read log from this container
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "service_name"
+  }
+}
+
+loki.source.docker "default" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.process.json.receiver]
+}
+
+loki.process "json" {
+  stage.json {
+    expressions = { trace_id = "trace_id", level = "level" }
+  }
+  stage.labels {
+    values = { level = "level" }
+  }
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

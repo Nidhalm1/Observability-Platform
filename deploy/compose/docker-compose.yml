@@ -148,3 +148,4 @@ services:
 volumes:
   postgres_data:
   prom-data:
+  tempo-data:

@@ -14,4 +14,4 @@ storage: # where to store
     local:
       path: /var/tempo/blocks
     wal:
-      path: /var/tempo/wal
+      path: /var/tempo/wal 
