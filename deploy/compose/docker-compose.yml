@@ -106,6 +106,45 @@ services:
     depends_on:
       - gateway
 
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otel-collector.yaml:ro
+    depends_on:
+      - tempo
+
+
+  tempo:
+    image: grafana/tempo:latest
+    user: "0:0"
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_FEATURE_TOGGLES_ENABLE: traceToMetrics
+    volumes:
+      - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/ds.yaml:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - tempo
+      - prometheus
+
+
+
+
+
+
+
 volumes:
   postgres_data:
   prom-data:
