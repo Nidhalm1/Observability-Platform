@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -66,11 +66,14 @@ func RouteSpanName() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
+				span := trace.SpanFromContext(r.Context())
 				rc := chi.RouteContext(r.Context())
+				//if error name HTTP GET for exemple instead of GET /something-random-123456
 				if rc == nil || rc.RoutePattern() == "" {
+					span.SetName("HTTP " + r.Method)
 					return
 				}
-				trace.SpanFromContext(r.Context()).SetName(r.Method + " " + rc.RoutePattern())
+				span.SetName(r.Method + " " + rc.RoutePattern())
 			}()
 
 			next.ServeHTTP(w, r)

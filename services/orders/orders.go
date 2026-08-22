@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/XSAM/otelsql"
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 
 	// Registers the "pgx/v4" driver with database/sql. Imported for that side
 	// effect alone -- nothing in this file calls into it directly.
@@ -136,7 +136,7 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(telemetry.Metrics("orders"))
-	r.Use(telemetry.RouteSpanName())
+	r.Use(telemetry.RouteSpanName()) // cretae same sapn name for the same method
 	r.Post("/orders", s.createOrder)
 	r.Get("/orders/{id}", s.getOrder)
 	r.Handle("/metrics", promhttp.Handler())
