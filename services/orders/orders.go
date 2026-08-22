@@ -23,6 +23,7 @@ import (
 	// effect alone -- nothing in this file calls into it directly.
 	_ "github.com/jackc/pgx/v4/stdlib"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
 	"github.com/Nidhalm1/Observability-Platform/internal/telemetry"
@@ -65,7 +66,7 @@ func main() {
 	defer func() { os.Exit(exitCode) }()
 
 	logger := telemetry.SetupLogger("orders")
-	//when he get a signal from the contain er do not stop directrly
+	//when he get a signal from the contain abort and go to ctx.done()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -88,7 +89,7 @@ func main() {
 		exitCode = 1
 		return
 	}
-
+	//schedule when main ends to flush the traces and shutdown the tracer provider
 	defer func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -100,7 +101,10 @@ func main() {
 	s := &server{
 		inventoryURL: inventoryURL,
 		logger:       logger,
-		client:       &http.Client{Timeout: 2 * time.Second},
+		client: &http.Client{
+			Timeout:   2 * time.Second,
+			Transport: otelhttp.NewTransport(http.DefaultTransport), //to send traceparent header to the inventory service
+		},
 	}
 
 	s.db, err = otelsql.Open("pgx/v4", databaseURL,
@@ -141,7 +145,7 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-
+	// telemetry.Tracing("orders", r) for linking spans , reading traceparent ect
 	srv := &http.Server{Addr: ":" + port, Handler: telemetry.Tracing("orders", r)}
 
 	serveErr := make(chan error, 1)
@@ -162,7 +166,8 @@ func main() {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
-
+	//contex.background because maybe the firsto contexct gets direct buy sigterm
+	//wait for handle to finish and shutdown the server
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {

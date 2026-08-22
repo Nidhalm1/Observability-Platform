@@ -24,8 +24,9 @@ func SetupTracing(ctx context.Context, service string) (func(context.Context) er
 		return nil, err
 	}
 	// each span with its service name
-	res, err := resource.New(ctx,
-		resource.WithAttributes(semconv.ServiceName(service)),
+
+	res, err := resource.Merge(resource.Default(),
+		resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName(service)),
 	)
 	if err != nil {
 		return nil, err
@@ -47,7 +48,11 @@ func SetupTracing(ctx context.Context, service string) (func(context.Context) er
 }
 
 func Tracing(service string, next http.Handler) http.Handler {
+	// Tracing(service, next) wraps the whole server. It creates the server span
+	// for each request and reads the incoming traceparent header, linking the
+	// span to the caller's trace for distributed tracing.
 	return otelhttp.NewHandler(next, service,
+		// Skip Prometheus scrapes so /metrics does not create thousands of junk spans.
 		otelhttp.WithFilter(func(r *http.Request) bool {
 			return r.URL.Path != "/metrics"
 		}),

@@ -58,6 +58,7 @@ services:
     environment:
       DATABASE_URL: postgres://obs:obs@postgres:5432/obs?sslmode=disable
       INVENTORY_SERVICE_URL: http://inventory:8080
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       PORT: 8080
     ports:
       - "5049:8080"
@@ -66,6 +67,7 @@ services:
         condition: service_healthy
       inventory:
         condition: service_started
+    stop_grace_period: 20s
 
   # No DATABASE_URL: the gateway has no database. It validates and routes.
   gateway:
