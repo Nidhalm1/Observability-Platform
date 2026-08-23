@@ -1,0 +1,31 @@
+auth_enabled: false #no need for authentication in this examples
+#http://loki:3100 is enough
+
+server:
+  http_listen_port: 3100  # alooy send logs here
+
+common:
+  instance_addr: 127.0.0.1 # loki's adress
+  path_prefix: /loki #where store data
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks # the chunks are the logs
+      rules_directory: /loki/rules # the rules for alerte ect .. if 100 logs error then ...s
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config: # how the logs are stored
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13 
+      index:  # create index every 24h to make it easier to search for logs
+        prefix: index_
+        period: 24h
+
+limits_config: # keep logs for 7 days
+  retention_period: 168h
+  allow_structured_metadata: true # to allow structured metadata in the logs

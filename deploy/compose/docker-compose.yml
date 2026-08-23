@@ -98,6 +98,7 @@ services:
       # silently computes over whatever exists and looks fine (Phase 14).
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=45d
+      - --enable-feature=exemplar-storage
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prom-data:/prometheus
@@ -138,14 +139,35 @@ services:
     depends_on:
       - tempo
       - prometheus
+      - loki
 
 
+  loki:
+    image: grafana/loki:latest
+    user: "0:0"
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki # keep the logs in a volume so that they are not lost when the container is restarted
 
-
-
-
+  alloy:
+    image: grafana/alloy:latest
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data #for own data 
+      - /etc/alloy/config.river #config file
+    volumes:
+      - ./alloy.river:/etc/alloy/config.river:ro # it's a config file, not a directory, so mount it read-only
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data # store its data in a volume nothing special
+    depends_on:
+      - loki
 
 volumes:
   postgres_data:
   prom-data:
   tempo-data:
+  loki-data:
+  alloy-data:
+  

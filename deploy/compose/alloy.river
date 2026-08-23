@@ -1,0 +1,41 @@
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock" 
+} //ask docker the conatiners he has
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "service_name"
+  }
+}
+//"Read logs from all those Docker containers."
+loki.source.docker "default" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  labels     = { job = "docker" } // add a label to the logs to identify them as coming from Docker containers
+  forward_to = [loki.process.json.receiver]
+}
+
+loki.process "json" {
+  stage.json {
+    expressions = {
+      level = "level", // to easy filter the logs by their level (info, error, debug, etc.)
+    }
+  }
+//"Parse the logs as JSON and extract the 'level' field."
+//"Add a label 'level' to the log entries tp make it easier to filter logs by their level 
+  stage.labels {
+    values = { level = "level" }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+//"Send the processed logs to Loki at loki:3100."
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push" // sends the logs to loki at the endpoint /loki/api/v1/push
+  }
+}
