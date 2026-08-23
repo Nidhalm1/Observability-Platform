@@ -130,12 +130,12 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 
 	var order OrderRequest
 	if err := json.NewDecoder(r.Body).Decode(&order); err != nil {
-		s.logger.Warn("invalid JSON", "error", err)
+		telemetry.LogWith(ctx).Warn("invalid JSON", "error", err)
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 	if !verify(order) {
-		s.logger.Warn("invalid order", "customer_id", order.CustomerID, "items", len(order.Items))
+		telemetry.LogWith(ctx).Warn("invalid order", "customer_id", order.CustomerID, "items", len(order.Items))
 		http.Error(w, "invalid order", http.StatusBadRequest)
 		return
 	}
@@ -162,11 +162,12 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	id := chi.URLParam(r, "id")
 	if _, err := strconv.ParseInt(id, 10, 64); err != nil {
 		// Validate before forwarding: keeps junk out of the downstream service
 		// and gives the caller a 400 instead of a 404 from two hops away.
-		s.logger.Warn("invalid order id", "id", id)
+		telemetry.LogWith(ctx).Warn("invalid order id", "id", id)
 		http.Error(w, "invalid order id", http.StatusBadRequest)
 		return
 	}
@@ -191,7 +192,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 func (s *server) forward(w http.ResponseWriter, req *http.Request) {
 	resp, err := s.client.Do(req)
 	if err != nil {
-		s.logger.Error("call orders failed", "url", req.URL.String(), "error", err)
+		telemetry.LogWith(req.Context()).Error("call orders failed", "url", req.URL.String(), "error", err)
 		http.Error(w, "orders service unavailable", http.StatusServiceUnavailable)
 		return
 	}

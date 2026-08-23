@@ -1,8 +1,11 @@
 package telemetry
 
 import (
+	"context"
 	"log/slog"
 	"os"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // SetupLogger builds the one logger a service uses. Same handler, same fields,
@@ -22,4 +25,16 @@ func SetupLogger(service string) *slog.Logger {
 	}*/
 	slog.SetDefault(logger) // so package-level slog.Info() also works // si u can simply do slog.Info("order created")
 	return logger
+}
+
+// to add also   "span_id": "def456..." in the log
+func LogWith(ctx context.Context) *slog.Logger {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return slog.Default()
+	}
+	return slog.With(
+		"trace_id", sc.TraceID().String(),
+		"span_id", sc.SpanID().String(),
+	)
 }

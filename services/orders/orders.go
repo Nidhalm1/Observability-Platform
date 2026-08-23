@@ -201,7 +201,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.logger.Error("get order failed", "order_id", id, "error", err)
+		telemetry.LogWith(ctx).Error("get order failed", "order_id", id, "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -214,7 +214,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 		id,
 	)
 	if err != nil {
-		s.logger.Error("get items failed", "order_id", id, "error", err)
+		telemetry.LogWith(ctx).Error("get items failed", "order_id", id, "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -224,7 +224,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var it Item
 		if err := rows.Scan(&it.SKU, &it.Qty, &it.Price); err != nil {
-			s.logger.Error("scan item failed", "order_id", id, "error", err)
+			telemetry.LogWith(ctx).Error("scan item failed", "order_id", id, "error", err)
 			http.Error(w, "database error", http.StatusInternalServerError)
 			return
 		}
@@ -233,7 +233,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	// rows.Err() reports failures that happen mid-iteration, which the loop
 	// above cannot see. Skipping it silently truncates result sets.
 	if err := rows.Err(); err != nil {
-		s.logger.Error("iterate items failed", "order_id", id, "error", err)
+		telemetry.LogWith(ctx).Error("iterate items failed", "order_id", id, "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -248,14 +248,14 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	var order OrderRequest
 	err := json.NewDecoder(r.Body).Decode(&order)
 	if err != nil {
-		s.logger.Warn("invalid JSON", "error", err)
+		telemetry.LogWith(ctx).Warn("invalid JSON", "error", err)
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 	// The gateway validates too. Orders is directly reachable on its own port,
 	// so it cannot assume it was called through the gateway.
 	if order.CustomerID <= 0 || len(order.Items) == 0 {
-		s.logger.Warn("invalid order", "customer_id", order.CustomerID, "items", len(order.Items))
+		telemetry.LogWith(ctx).Warn("invalid order", "customer_id", order.CustomerID, "items", len(order.Items))
 		http.Error(w, "invalid order", http.StatusBadRequest)
 		return
 	}
@@ -271,7 +271,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	).Scan(&orderID, &createdAt)
 	cancel()
 	if err != nil {
-		s.logger.Error("insert order failed", "error", err)
+		telemetry.LogWith(ctx).Error("insert order failed", "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -294,7 +294,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		s.logger.Error("call inventory failed", "error", err)
+		telemetry.LogWith(ctx).Error("call inventory failed", "error", err)
 		http.Error(w, "inventory service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -352,7 +352,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	)
 	cancel()
 	if err != nil {
-		s.logger.Error("update order failed", "order_id", orderID, "error", err)
+		telemetry.LogWith(ctx).Error("update order failed", "order_id", orderID, "error", err)
 		http.Error(w, "failed to update order status", http.StatusInternalServerError)
 		return
 	}
@@ -374,7 +374,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 		_, err = s.db.ExecContext(insertCtx, sb.String(), args...)
 		cancel()
 		if err != nil {
-			s.logger.Error("insert items failed", "order_id", orderID, "error", err)
+			telemetry.LogWith(ctx).Error("insert items failed", "order_id", orderID, "error", err)
 			http.Error(w, "failed to insert order items", http.StatusInternalServerError)
 			return
 		}

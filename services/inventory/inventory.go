@@ -175,12 +175,12 @@ func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
 	).Scan(&out.SKU, &out.Warehouse, &out.Quantity, &out.Reserved, &out.Price)
 
 	if errors.Is(err, sql.ErrNoRows) {
-		s.logger.Warn("unknown sku", "sku", chi.URLParam(r, "sku"))
+		telemetry.LogWith(ctx).Warn("unknown sku", "sku", chi.URLParam(r, "sku"))
 		http.Error(w, "unknown sku", http.StatusNotFound)
 		return
 	}
 	if err != nil {
-		s.logger.Error("get stock failed", "sku", chi.URLParam(r, "sku"), "error", err)
+		telemetry.LogWith(ctx).Error("get stock failed", "sku", chi.URLParam(r, "sku"), "error", err)
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -195,7 +195,7 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 	var order OrderRequest
 	err := json.NewDecoder(r.Body).Decode(&order)
 	if err != nil {
-		s.logger.Warn("invalid JSON", "error", err)
+		telemetry.LogWith(ctx).Warn("invalid JSON", "error", err)
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -238,7 +238,7 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 			// no rows = unknown SKU; anything else = a real DB error. Both are
 			// reported to the caller as -1, but only one of them is worth a log
 			// line at ERROR once Phase 3 adds levels.
-			s.logger.Error("reserve failed", "sku", item.SKU, "qty", item.Qty, "error", err)
+			telemetry.LogWith(ctx).Error("reserve failed", "sku", item.SKU, "qty", item.Qty, "error", err)
 			order.Items[i] = Item{SKU: item.SKU, Qty: -1, Price: 0}
 			continue
 		}
