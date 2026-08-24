@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -77,9 +78,18 @@ func Metrics(service string) func(http.Handler) http.Handler {
 				httpRequests.WithLabelValues(
 					service, r.Method, route, strconv.Itoa(rec.status),
 				).Inc()
-				httpDuration.WithLabelValues(
-					service, r.Method, route,
-				).Observe(time.Since(start).Seconds())
+
+				elapsed := time.Since(start).Seconds()
+				obs := httpDuration.WithLabelValues(service, r.Method, route)
+				// get trace id from this request
+				sc := trace.SpanContextFromContext(r.Context())
+				if o, ok := obs.(prometheus.ExemplarObserver); ok && sc.IsSampled() {
+					o.ObserveWithExemplar(elapsed, prometheus.Labels{
+						"trace_id": sc.TraceID().String(),
+					})
+				} else {
+					obs.Observe(elapsed)
+				}
 			}()
 
 			next.ServeHTTP(rec, r)

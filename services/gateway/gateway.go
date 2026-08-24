@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -88,7 +89,12 @@ func main() {
 	r.Use(telemetry.RouteSpanName()) // cretae same sapn name for the same method
 	r.Post("/orders", s.createOrder)
 	r.Get("/orders/{id}", s.getOrder)
-	r.Handle("/metrics", promhttp.Handler())
+	// OpenMetrics: the classic text format has no exemplar syntax, so
+	// exemplars would be dropped at serialization.
+	r.Handle("/metrics", promhttp.HandlerFor(
+		prometheus.DefaultGatherer,
+		promhttp.HandlerOpts{EnableOpenMetrics: true},
+	))
 
 	port := os.Getenv("PORT")
 	if port == "" {

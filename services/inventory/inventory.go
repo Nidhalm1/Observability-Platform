@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	_ "github.com/jackc/pgx/v4/stdlib"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
@@ -118,7 +119,12 @@ func main() {
 	r.Use(telemetry.RouteSpanName()) // cretae same sapn name for the same method
 	r.Post("/check", s.checkOrder)
 	r.Get("/inventory/{sku}", s.getStock)
-	r.Handle("/metrics", promhttp.Handler())
+	// OpenMetrics: the classic text format has no exemplar syntax, so
+	// exemplars would be dropped at serialization.
+	r.Handle("/metrics", promhttp.HandlerFor(
+		prometheus.DefaultGatherer,
+		promhttp.HandlerOpts{EnableOpenMetrics: true},
+	))
 
 	port := os.Getenv("PORT")
 	if port == "" {
