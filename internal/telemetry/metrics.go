@@ -80,14 +80,19 @@ func Metrics(service string) func(http.Handler) http.Handler {
 				).Inc()
 
 				elapsed := time.Since(start).Seconds()
+				//selecting histogram
 				obs := httpDuration.WithLabelValues(service, r.Method, route)
-				// get trace id from this request
+				// get trace id , and span id from this request from my new created span  but only use trace id
+
 				sc := trace.SpanContextFromContext(r.Context())
+				// can he store exemplars ? and is this particul trace is selected to be stored 
 				if o, ok := obs.(prometheus.ExemplarObserver); ok && sc.IsSampled() {
 					o.ObserveWithExemplar(elapsed, prometheus.Labels{
+						//if yes store in this histogram  + trace id
 						"trace_id": sc.TraceID().String(),
 					})
 				} else {
+					//if no only in histogram
 					obs.Observe(elapsed)
 				}
 			}()

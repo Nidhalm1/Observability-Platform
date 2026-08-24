@@ -151,7 +151,7 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	// telemetry.Tracing("orders", r) for linking spans , reading traceparent ect
+	// telemetry.Tracing("orders", r) for linking spans , reading traceparent ect and create the new span by decidin smaple or not in the configuration
 	srv := &http.Server{Addr: ":" + port, Handler: telemetry.Tracing("orders", r)}
 
 	serveErr := make(chan error, 1)

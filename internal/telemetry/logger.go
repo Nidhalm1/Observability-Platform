@@ -27,7 +27,7 @@ func SetupLogger(service string) *slog.Logger {
 	return logger
 }
 
-// to add also   "span_id": "def456..." in the log
+// to add also   "span_id": "def456..." in the log and traceid 
 func LogWith(ctx context.Context) *slog.Logger {
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {

@@ -39,8 +39,8 @@ func SetupTracing(ctx context.Context, service string) (func(context.Context) er
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
+		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(0.5)), // sample ~50% of traces,// sample each trace can be store 
+	) //
 	otel.SetTracerProvider(tp)
 
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -65,7 +65,7 @@ func Tracing(service string, next http.Handler) http.Handler {
 		}),
 	)
 }
-
+//maybe change to be more precise
 func RouteSpanName() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -5,10 +5,35 @@ datasources: # tell Grafana to load these datasources on startup
     uid: prom
     url: http://prometheus:9090
     isDefault: true
+    jsonData:
+      exemplarTraceIdDestinations:
+        - name: trace_id # when u find a metric with trace_id use this database to find the trace
+          datasourceUid: tempo
+
+  - name: Loki
+    type: loki
+    uid: loki
+    url: http://loki:3100
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id":"([a-f0-9]+)"'    #
+          url: '$${__value.raw}'
+          datasourceUid: tempo  # can click from a log → trace. beecause logs have span id and trace id with them
 
   - name: Tempo
     type: tempo
     uid: tempo
     url: http://tempo:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki   # tempo -> logs 
+        spanStartTimeShift: '-1h'
+        spanEndTimeShift: '1h'
+        filterByTraceID: true
+        filterBySpanID: false
+        tags:
+          - key: 'service.name'
+            value: 'service_name'
 
 #traces and metrics no logs yet
