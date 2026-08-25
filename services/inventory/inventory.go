@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Nidhalm1/Observability-Platform/internal/faults"
 	"github.com/XSAM/otelsql"
 	"github.com/go-chi/chi/v5"
 
@@ -121,6 +122,7 @@ func main() {
 	r.Get("/inventory/{sku}", s.getStock)
 	// OpenMetrics: the classic text format has no exemplar syntax, so
 	// exemplars would be dropped at serialization.
+	r.Post("/admin/fault", faults.Handler())
 	r.Handle("/metrics", promhttp.HandlerFor(
 		prometheus.DefaultGatherer,
 		promhttp.HandlerOpts{EnableOpenMetrics: true},
