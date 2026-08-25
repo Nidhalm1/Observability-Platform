@@ -23,7 +23,7 @@ CREATE TABLE inventory (
 -- NO INDEX ON inventory.sku -- see header. Fix lives in db/fixes/001_add_inventory_sku_index.sql
 
 CREATE TABLE orders (
-    id          BIGSERIAL    PRIMARY KEY,
+    id          BIGSERIAL    PRIMARY KEY, --automaticly indexd because primary key
     customer_id BIGINT       NOT NULL,
     status      order_status NOT NULL DEFAULT 'pending',
     total_cents BIGINT       NOT NULL DEFAULT 0 CHECK (total_cents >= 0),

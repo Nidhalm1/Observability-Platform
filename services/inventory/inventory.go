@@ -165,20 +165,24 @@ func main() {
 	}
 }
 
-// getStock is the read-only view of a SKU. Same unindexed WHERE as checkOrder,
-// but without the write -- the cleanest endpoint to point k6 at when
-// demonstrating Fault 1.
+func skuPredicate() string {
+	if faults.NoIndex() {
+		return `sku || ''`
+	}
+	return `sku`
+}
+
 func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
 	defer cancel()
 
 	var out StockResponse
-	// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1. The otelsql
-	// span around this query is what makes the seq scan visible in a trace.
+	// The otelsql span around this query is what makes the seq scan visible in
+	// a trace once Fault 1 is switched on.
 	err := s.db.QueryRowContext(ctx,
 		`SELECT sku, warehouse, quantity, reserved, unit_price_cents
 		   FROM inventory
-		  WHERE sku = $1`,
+		  WHERE `+skuPredicate()+` = $1`,
 		chi.URLParam(r, "sku"),
 	).Scan(&out.SKU, &out.Warehouse, &out.Quantity, &out.Reserved, &out.Price)
 
@@ -222,14 +226,13 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 		// can still read via `a` -- that is what makes the granted amount knowable
 		// in a single trip. LEAST() handles partial fulfilment.
 		//
-		// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1.
 		dbCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 		err := s.db.QueryRowContext(
 			dbCtx,
 			`WITH a AS (
                  SELECT id, quantity - reserved AS available, unit_price_cents
                  FROM inventory
-                 WHERE sku = $1
+                 WHERE `+skuPredicate()+` = $1
                  FOR UPDATE
              )
              UPDATE inventory i
