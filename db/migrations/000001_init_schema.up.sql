@@ -18,7 +18,7 @@ CREATE TABLE inventory (
 -- No index on inventory.sku yet -- see header. It is created in 000004_inventory_index.
 
 CREATE TABLE orders (
-    id          BIGSERIAL    PRIMARY KEY,
+    id          BIGSERIAL    PRIMARY KEY, --automaticly indexd because primary key
     customer_id BIGINT       NOT NULL,
     status      order_status NOT NULL DEFAULT 'pending',
     total_cents BIGINT       NOT NULL DEFAULT 0 CHECK (total_cents >= 0),

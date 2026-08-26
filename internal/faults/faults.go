@@ -21,10 +21,15 @@ func NPlusOne() bool { return n1.Load() }
 func NoIndex() bool  { return noIndex.Load() }
 
 // Hit returns true for `percent` of calls.
-func Hit(percent int) bool {
+func Hit(percent int) bool { //
 	return percent > 0 && rand.Intn(100) < percent
 }
 
+// if faults.Hit(10) { 10 pr cent of the time, do something
+// execute fault
+// }
+
+// POST /admin/fault?errors=10&slow=5&n1=true
 func Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
