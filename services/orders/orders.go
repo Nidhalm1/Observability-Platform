@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
+	"github.com/Nidhalm1/Observability-Platform/internal/faults"
 	"github.com/Nidhalm1/Observability-Platform/internal/telemetry"
 )
 
@@ -140,6 +141,7 @@ func main() {
 	r.Use(telemetry.RouteSpanName()) // cretae same sapn name for the same method
 	r.Post("/orders", s.createOrder)
 	r.Get("/orders/{id}", s.getOrder)
+	r.Post("/admin/fault", faults.Handler())
 	// OpenMetrics: the classic text format has no exemplar syntax, so
 	// exemplars would be dropped at serialization.
 	r.Handle("/metrics", promhttp.HandlerFor(

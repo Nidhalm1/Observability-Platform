@@ -1,10 +1,5 @@
 -- Phase 1 schema: orders, order_items, inventory.
 --
--- READ BEFORE CHANGING:
--- `inventory.sku` deliberately has NO index and NO UNIQUE constraint. That is
--- Fault 1 (missing index). Adding UNIQUE here makes Postgres create an index
--- automatically and silently destroys the fault. The surrogate `id` PK exists
--- purely so `sku` can stay unindexed.
 
 BEGIN;
 
@@ -20,7 +15,7 @@ CREATE TABLE inventory (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- NO INDEX ON inventory.sku -- see header. Fix lives in db/fixes/001_add_inventory_sku_index.sql
+-- No index on inventory.sku yet -- see header. It is created in 000004_inventory_index.
 
 CREATE TABLE orders (
     id          BIGSERIAL    PRIMARY KEY,
@@ -30,7 +25,7 @@ CREATE TABLE orders (
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
-
+-- unused right now but maybe in the future
 CREATE INDEX idx_orders_customer_created ON orders (customer_id, created_at DESC);
 
 CREATE TABLE order_items (

@@ -15,10 +15,10 @@ var (
 	noIndex   atomic.Bool
 )
 
-func ErrorRate() int  { return int(errorRate.Load()) }
-func SlowRate() int   { return int(slowRate.Load()) }
-func NPlusOne() bool  { return n1.Load() }
-func NoIndex() bool   { return noIndex.Load() }
+func ErrorRate() int { return int(errorRate.Load()) }
+func SlowRate() int  { return int(slowRate.Load()) }
+func NPlusOne() bool { return n1.Load() }
+func NoIndex() bool  { return noIndex.Load() }
 
 // Hit returns true for `percent` of calls.
 func Hit(percent int) bool {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,12 +21,59 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
+	"github.com/Nidhalm1/Observability-Platform/internal/faults"
 	"github.com/Nidhalm1/Observability-Platform/internal/telemetry"
 )
 
 // A DB call with no deadline inherits only the client's patience. Bound it here
 // so a slow query surfaces as a fast error instead of a hung goroutine.
 const dbTimeout = 2 * time.Second
+
+// skuQuery is a query filtering on inventory.sku, kept in both of its
+// planner-visible forms so arming Fault 1 costs nothing per request.
+type skuQuery struct{ indexed, seqScan string }
+
+// newSKUQuery fills the %s in tmpl with each form of the SKU predicate.
+func newSKUQuery(tmpl string) skuQuery {
+	return skuQuery{
+		// Matches idx_inventory_sku from migration 000004: Index Scan.
+		indexed: fmt.Sprintf(tmpl, `sku = $1`),
+
+		seqScan: fmt.Sprintf(tmpl, `sku || '' = $1`), // to avoid using index and check all rows
+	}
+}
+
+// stmt picks the form matching the current fault state. faults.NoIndex reads an
+// atomic: /admin/fault writes it from whichever goroutine served that request.
+// Named stmt, not sql, so it does not read like the database/sql package.
+func (q skuQuery) stmt() string {
+	if faults.NoIndex() {
+		return q.seqScan
+	}
+	return q.indexed
+}
+
+var (
+	// GET /inventory/{sku} -- read-only, the cleanest endpoint to point k6 at.
+	stockQuery = newSKUQuery(`SELECT sku, warehouse, quantity, reserved, unit_price_cents
+		   FROM inventory
+		  WHERE %s`)
+
+	// POST /check -- the reservation path runs through the same lookup, so the
+	// toggle degrades a whole POST /orders trace and not just the standalone
+	// read. Without this one, flipping the fault does nothing to the main flow.
+	reserveQuery = newSKUQuery(`WITH a AS (
+                 SELECT id, quantity - reserved AS available, unit_price_cents
+                 FROM inventory
+                 WHERE %s
+                 FOR UPDATE
+             )
+             UPDATE inventory i
+             SET reserved = i.reserved + LEAST($2, a.available)
+             FROM a
+             WHERE i.id = a.id
+             RETURNING LEAST($2, a.available), a.unit_price_cents`)
+)
 
 type server struct {
 	db     *sql.DB
@@ -119,6 +167,9 @@ func main() {
 	r.Use(telemetry.RouteSpanName()) // cretae same sapn name for the same method
 	r.Post("/check", s.checkOrder)
 	r.Get("/inventory/{sku}", s.getStock)
+	// Fault switchboard: POST /admin/fault?noindex=true|false. No auth -- this
+	// is a demo rig, and the endpoint has no business existing in production.
+	r.Post("/admin/fault", faults.Handler())
 	// OpenMetrics: the classic text format has no exemplar syntax, so
 	// exemplars would be dropped at serialization.
 	r.Handle("/metrics", promhttp.HandlerFor(
@@ -163,20 +214,19 @@ func main() {
 	}
 }
 
-// getStock is the read-only view of a SKU. Same unindexed WHERE as checkOrder,
-// but without the write -- the cleanest endpoint to point k6 at when
-// demonstrating Fault 1.
+// getStock is the read-only view of a SKU. Same SKU lookup as checkOrder but
+// without the write, which makes it the cleanest endpoint to point k6 at when
+// demonstrating Fault 1: no row locks in the way of the measurement.
 func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
 	defer cancel()
 
 	var out StockResponse
-	// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1. The otelsql
-	// span around this query is what makes the seq scan visible in a trace.
+	// Index Scan normally, Seq Scan while Fault 1 is armed -- see skuQuery. The
+	// otelsql span around this call is what makes the difference visible in a
+	// trace rather than only in EXPLAIN.
 	err := s.db.QueryRowContext(ctx,
-		`SELECT sku, warehouse, quantity, reserved, unit_price_cents
-		   FROM inventory
-		  WHERE sku = $1`,
+		stockQuery.stmt(),
 		chi.URLParam(r, "sku"),
 	).Scan(&out.SKU, &out.Warehouse, &out.Quantity, &out.Reserved, &out.Price)
 
@@ -209,32 +259,10 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 	for i, item := range order.Items {
 		var granted int
 		var price int
-
-		// One atomic statement instead of SELECT-then-UPDATE.
-		//
-		// The old version read `reserved`, then wrote it in a second round trip:
-		// two concurrent orders for the same SKU both read the same value and
-		// both succeeded, so stock was oversold (lost update).
-		//
-		// The CTE takes a row lock and captures available-BEFORE, which RETURNING
-		// can still read via `a` -- that is what makes the granted amount knowable
-		// in a single trip. LEAST() handles partial fulfilment.
-		//
-		// `WHERE sku = $1` stays unindexed on purpose: this is Fault 1.
 		dbCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 		err := s.db.QueryRowContext(
 			dbCtx,
-			`WITH a AS (
-                 SELECT id, quantity - reserved AS available, unit_price_cents
-                 FROM inventory
-                 WHERE sku = $1
-                 FOR UPDATE
-             )
-             UPDATE inventory i
-             SET reserved = i.reserved + LEAST($2, a.available)
-             FROM a
-             WHERE i.id = a.id
-             RETURNING LEAST($2, a.available), a.unit_price_cents`,
+			reserveQuery.stmt(),
 			item.SKU,
 			item.Qty,
 		).Scan(&granted, &price)
