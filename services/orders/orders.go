@@ -214,6 +214,28 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	out.Items, err = s.loadItems(ctx, id)
+	if err != nil {
+		telemetry.LogWith(ctx).Error("get items failed", "order_id", id, "error", err)
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
+}
+
+// loadItems returns an order's line items, by whichever path Fault 2 selects.
+func (s *server) loadItems(ctx context.Context, id int64) ([]Item, error) {
+	if faults.NPlusOne() {
+		return s.itemsNPlusOne(ctx, id)
+	}
+	return s.itemsOneQuery(ctx, id)
+}
+
+// itemsOneQuery is the correct version: every row in a single round trip,
+// served by idx_order_items_order_id.
+func (s *server) itemsOneQuery(ctx context.Context, id int64) ([]Item, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT sku, qty, unit_price_cents
 		   FROM order_items
@@ -222,32 +244,63 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 		id,
 	)
 	if err != nil {
-		telemetry.LogWith(ctx).Error("get items failed", "order_id", id, "error", err)
-		http.Error(w, "database error", http.StatusInternalServerError)
-		return
+		return nil, err
 	}
 	defer rows.Close()
 
-	out.Items = []Item{} // not nil: encodes as [] rather than null
+	out := []Item{} // not nil: encodes as [] rather than null
 	for rows.Next() {
 		var it Item
 		if err := rows.Scan(&it.SKU, &it.Qty, &it.Price); err != nil {
-			telemetry.LogWith(ctx).Error("scan item failed", "order_id", id, "error", err)
-			http.Error(w, "database error", http.StatusInternalServerError)
-			return
+			return nil, err
 		}
-		out.Items = append(out.Items, it)
+		out = append(out, it)
 	}
 	// rows.Err() reports failures that happen mid-iteration, which the loop
 	// above cannot see. Skipping it silently truncates result sets.
 	if err := rows.Err(); err != nil {
-		telemetry.LogWith(ctx).Error("iterate items failed", "order_id", id, "error", err)
-		http.Error(w, "database error", http.StatusInternalServerError)
-		return
+		return nil, err
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	return out, nil
+}
+//
+func (s *server) itemsNPlusOne(ctx context.Context, id int64) ([]Item, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM order_items WHERE order_id = $1 ORDER BY id`,
+		id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var itemIDs []int64
+	for rows.Next() {
+		var itemID int64
+		if err := rows.Scan(&itemID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		itemIDs = append(itemIDs, itemID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	// for each id  we make one query 
+	out := make([]Item, 0, len(itemIDs))
+	for _, itemID := range itemIDs {
+		var it Item
+	
+		err := s.db.QueryRowContext(ctx,
+			`SELECT sku, qty, unit_price_cents FROM order_items WHERE id = $1`,
+			itemID,
+		).Scan(&it.SKU, &it.Qty, &it.Price)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, nil
 }
 
 func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {

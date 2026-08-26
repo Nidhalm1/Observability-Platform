@@ -17,8 +17,8 @@ for f in db/migrations/*.up.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "
 | Table         | Rows  | Notes                                              |
 | ------------- | ----- | -------------------------------------------------- |
 | `inventory`   | 200k  | `sku` indexed by 000004; Fault 1 defeats it at runtime |
-| `orders`      | 5k    | 500 customers, spread over 30 days                  |
-| `order_items` | ~102k | 1–40 items per order — variable width drives Fault 2 |
+| `orders`      | 5,001 | 500 customers over 30 days, plus the wide order from 000005 |
+| `order_items` | ~102k | 1–40 items per order, plus one with 50 — width drives Fault 2 |
 
 Seed data is deterministic (modular arithmetic, no `random()`), so before/after
 numbers are comparable across machines and reruns.
@@ -69,6 +69,40 @@ psql "$DATABASE_URL" -c "CREATE INDEX CONCURRENTLY idx_inventory_sku ON inventor
 EXCLUSIVE lock and blocks writes for its duration. It cannot run inside a
 transaction block, which is why 000004 does not use it.
 
+## Fault 2 — how it is armed
+
+`GET /orders/{id}` loads line items one of two ways. Armed, it runs a cheap
+query for the item ids and then one round trip per id — same rows back, N+1
+times the round trips.
+
+```sh
+curl -XPOST "http://localhost:5049/admin/fault?n1=true"
+curl -XPOST "http://localhost:5049/admin/fault?n1=false"
+```
+
+Port 5049 is orders, not 5048 — each service holds its own flags.
+
+## Fault 2 — measure it
+
+The fault scales with item count, so compare a narrow order against a wide one
+rather than looking at any single number:
+
+```sh
+# the 50-item order seeded by 000005
+psql "$DATABASE_URL" -tAc "SELECT id FROM orders WHERE customer_id = 501;"
+
+# a 2-item order for contrast (id % 40 = 1)
+curl -s localhost:5049/orders/4961 | jq '.items | length'
+```
+
+Armed, the wide order draws 51 database spans in its trace waterfall against
+the narrow order's 3. That ratio is the tell: a query that is merely slow shows
+one fat span, an N+1 shows a staircase of thin ones.
+
+Note `getOrder` bounds the whole handler at `dbTimeout` (2s). Under enough
+concurrency the armed path will exhaust that and return 500 rather than a slow
+200 — that is the fault getting worse, not a separate bug.
+
 ## Queries the services need
 
 ```sql
@@ -83,9 +117,9 @@ INSERT INTO order_items (order_id, sku, qty, unit_price_cents) VALUES ($1, $2, $
 -- orders: GET /orders/{id}  -- the CORRECT version (one round trip)
 SELECT id, order_id, sku, qty, unit_price_cents FROM order_items WHERE order_id = $1;
 
--- Fault 2 is the same read done wrong: SELECT the order, then loop over its
--- items issuing one query per item. Flip it live with
--- POST /admin/fault?n1=true on the orders service.
+-- Fault 2 is the same read done wrong: SELECT the item ids, then loop issuing
+-- one query per id. Flip it live with POST /admin/fault?n1=true on orders.
+SELECT sku, qty, unit_price_cents FROM order_items WHERE id = $1;  -- x N
 ```
 
 ## Gotcha
