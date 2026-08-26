@@ -103,6 +103,46 @@ Note `getOrder` bounds the whole handler at `dbTimeout` (2s). Under enough
 concurrency the armed path will exhaust that and return 500 rather than a slow
 200 — that is the fault getting worse, not a separate bug.
 
+## Fault 3 — how it is armed
+
+Pool size is fixed when the pool is built, so this one is an env var and a
+restart, not an `/admin/fault` toggle:
+
+```sh
+cd deploy/compose
+DB_MAX_OPEN_CONNS=3 docker compose up -d --force-recreate orders
+docker compose up -d --force-recreate orders          # back to the default of 10
+```
+
+PowerShell wants `$env:DB_MAX_OPEN_CONNS=3` on its own line first. Note this is
+*not* `docker compose up -e` — `up` has no `-e` flag; the value is interpolated
+into the compose file from the shell environment.
+
+## Fault 3 — measure it
+
+Pool exhaustion is invisible in HTTP metrics alone: a request blocked waiting
+for a free connection and a request running a slow query look identical from
+the outside. These are the series that separate them:
+
+```promql
+# saturation -- how much of the pool is committed
+db_pool_in_use / db_pool_max_open
+
+# the actual tell: time spent queued for a connection
+rate(db_pool_wait_seconds_total[1m])
+rate(db_pool_wait_count_total[1m])
+```
+
+Put `rate(db_pool_wait_seconds_total[1m])` next to
+`histogram_quantile(0.99, sum by (le, service, route) (rate(http_request_duration_seconds_bucket[5m])))`
+on one graph. **Wait time climbing while query duration stays flat is the whole
+lesson** — the database is fine, the queue in front of it is not. Utilization
+tells you how busy something is; saturation tells you how much work is stuck
+behind it, and only the second one explains the latency.
+
+Arm Fault 2 at the same time for a much sharper demo: N+1 makes each request
+cycle through the pool N times, so a pool of 3 falls over almost immediately.
+
 ## Queries the services need
 
 ```sql

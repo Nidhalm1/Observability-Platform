@@ -7,6 +7,7 @@
 package telemetry
 
 import (
+	"database/sql"
 	"net/http"
 	"strconv"
 	"time"
@@ -42,6 +43,59 @@ var (
 		[]string{"service", "method", "route"},
 	)
 )
+
+func DBPoolMetrics(service string, db *sql.DB) error {
+	labels := prometheus.Labels{"service": service}
+
+	// Point-in-time levels. max_open is included so saturation can be expressed
+	// as a ratio -- db_pool_in_use / db_pool_max_open -- without hardcoding the
+	// limit into every dashboard query.
+	gauges := []struct { // gauge means can go up and down 
+		name, help string
+		val        func(sql.DBStats) float64
+	}{
+		{"db_pool_max_open", "Connection limit, from DB_MAX_OPEN_CONNS.",
+			func(st sql.DBStats) float64 { return float64(st.MaxOpenConnections) }}, // return the maximum allowed connecxions
+		{"db_pool_open", "Connections currently established, in use or idle.",
+			func(st sql.DBStats) float64 { return float64(st.OpenConnections) }}, // number of connection established
+		{"db_pool_in_use", "Connections currently executing a query.",
+			func(st sql.DBStats) float64 { return float64(st.InUse) }}, // how many connxion are used 
+		{"db_pool_idle", "Connections currently idle.",
+			func(st sql.DBStats) float64 { return float64(st.Idle) }}, // how many established conxions are free
+	}
+	for _, g := range gauges {
+		c := prometheus.NewGaugeFunc(
+			// When Prometheus requests /metrics, the function gets: db.Stats() and then g.val(...)
+			prometheus.GaugeOpts{Name: g.name, Help: g.help, ConstLabels: labels}, // the name ect of metrics
+			func() float64 { return g.val(db.Stats()) },//the value of the metric //get /metrics will excute this function 
+		)
+		if err := prometheus.Register(c); err != nil {
+			return err
+		}
+	}
+
+// the same to count Total number of waits for a connection and Total time blocked waiting for a connection.
+	counters := []struct {
+		name, help string
+		val        func(sql.DBStats) float64
+	}{
+		{"db_pool_wait_count_total", "Total number of waits for a connection.",
+			func(st sql.DBStats) float64 { return float64(st.WaitCount) }},
+		{"db_pool_wait_seconds_total", "Total time blocked waiting for a connection.",
+			func(st sql.DBStats) float64 { return st.WaitDuration.Seconds() }},
+	}
+	for _, c := range counters {
+		col := prometheus.NewCounterFunc(
+			prometheus.CounterOpts{Name: c.name, Help: c.help, ConstLabels: labels},
+			func() float64 { return c.val(db.Stats()) }, //func allo us to get the current value
+		)
+		if err := prometheus.Register(col); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
 
 type statusRecorder struct {
 	http.ResponseWriter

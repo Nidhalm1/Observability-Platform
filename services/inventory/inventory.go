@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -149,9 +150,30 @@ func main() {
 	}
 	defer s.db.Close()
 
-	s.db.SetMaxOpenConns(10)
-	s.db.SetMaxIdleConns(10)
+	// Fault 3 (pool exhaustion) is set here, not on /admin/fault: the pool size
+
+	maxConns := 10
+	if v := os.Getenv("DB_MAX_OPEN_CONNS"); v != "" {
+		// Junk is ignored rather than fatal. This knob exists to break the
+		// service deliberately; a typo should not look like the fault.
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxConns = n
+		} else {
+			logger.Warn("ignoring invalid DB_MAX_OPEN_CONNS", "value", v)
+		}
+	}
+	s.db.SetMaxOpenConns(maxConns)
+	// Idle tracks max so connections are not torn down and rebuilt between
+	// bursts -- otherwise the reconnect cost muddies the wait-time signal.
+	s.db.SetMaxIdleConns(maxConns)
 	s.db.SetConnMaxLifetime(30 * time.Minute)
+	logger.Info("db pool configured", "max_open_conns", maxConns)
+
+	if err := telemetry.DBPoolMetrics("inventory", s.db); err != nil {
+		logger.Error("db pool metrics registration failed", "error", err)
+		exitCode = 1
+		return
+	}
 
 	pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
 	err = s.db.PingContext(pingCtx)

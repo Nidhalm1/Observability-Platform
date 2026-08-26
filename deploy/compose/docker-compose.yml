@@ -45,6 +45,10 @@ services:
       DATABASE_URL: postgres://obs:obs@postgres:5432/obs?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       PORT: 8080
+      # Fault 3 (pool exhaustion). Read from the shell so the value can be
+      # changed without editing this file:
+      #   DB_MAX_OPEN_CONNS=3 docker compose up -d --force-recreate inventory
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-3}
     ports:
       - "5048:8080"
     depends_on:
@@ -65,6 +69,8 @@ services:
       INVENTORY_SERVICE_URL: http://inventory:8080
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       PORT: 8080
+     
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-3}
     ports:
       - "5049:8080"
     depends_on:
