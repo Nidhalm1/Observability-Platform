@@ -71,6 +71,8 @@ services:
       PORT: 8080
      
       DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-3}
+      # Fault 4 (missing timeout). Off by default -- with it on, orders waits
+      DISABLE_CLIENT_TIMEOUT: ${DISABLE_CLIENT_TIMEOUT:-false}
     ports:
       - "5049:8080"
     depends_on:

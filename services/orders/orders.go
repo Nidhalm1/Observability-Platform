@@ -100,11 +100,18 @@ func main() {
 		}
 	}()
 
+	// Fault 4 (missing timeout). This client timeout is the only thing bounding
+	timeout := 2 * time.Second
+	if os.Getenv("DISABLE_CLIENT_TIMEOUT") == "true" {
+		timeout = 0 // zero means no deadline at all: http.Client waits forever
+		logger.Warn("client timeout disabled -- calls to inventory are unbounded")
+	}
+
 	s := &server{
 		inventoryURL: inventoryURL,
 		logger:       logger,
 		client: &http.Client{
-			Timeout:   2 * time.Second,
+			Timeout:   timeout,
 			Transport: otelhttp.NewTransport(http.DefaultTransport), //to send traceparent header to the inventory service
 		},
 	}
@@ -144,6 +151,12 @@ func main() {
 
 	if err := telemetry.DBPoolMetrics("orders", s.db); err != nil {
 		logger.Error("db pool metrics registration failed", "error", err)
+		exitCode = 1
+		return
+	}
+
+	if err := telemetry.GoroutineMetrics("orders"); err != nil {
+		logger.Error("goroutine metrics registration failed", "error", err)
 		exitCode = 1
 		return
 	}

@@ -9,6 +9,7 @@ package telemetry
 import (
 	"database/sql"
 	"net/http"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -95,6 +96,21 @@ func DBPoolMetrics(service string, db *sql.DB) error {
 	}
 
 	return nil
+}
+
+// how many goroutines exist if the number is up or down each request = goroutine
+func GoroutineMetrics(service string) error {
+	return prometheus.Register(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name:        "go_goroutines_custom",
+			Help:        "Goroutines that currently exist, labelled by service.",
+			ConstLabels: prometheus.Labels{"service": service},
+		},
+		// Evaluated at scrape time, like the pool gauges: a request parked on a
+		// slow dependency is a goroutine, so a client with no timeout shows up
+		// here as a ramp that does not come back down.
+		func() float64 { return float64(runtime.NumGoroutine()) },
+	))
 }
 
 type statusRecorder struct {

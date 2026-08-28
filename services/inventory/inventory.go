@@ -175,6 +175,12 @@ func main() {
 		return
 	}
 
+	if err := telemetry.GoroutineMetrics("inventory"); err != nil {
+		logger.Error("goroutine metrics registration failed", "error", err)
+		exitCode = 1
+		return
+	}
+
 	pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
 	err = s.db.PingContext(pingCtx)
 	cancelPing()
@@ -269,6 +275,12 @@ func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// Fault 4 (slow tail): POST /admin/fault?slow=N makes N% of reservations
+
+	if faults.Hit(faults.SlowRate()) {
+		time.Sleep(5 * time.Second)
+	}
 
 	var order OrderRequest
 	err := json.NewDecoder(r.Body).Decode(&order)
