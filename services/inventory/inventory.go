@@ -246,6 +246,13 @@ func main() {
 // without the write, which makes it the cleanest endpoint to point k6 at when
 // demonstrating Fault 1: no row locks in the way of the measurement.
 func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
+	// Fault 5 (error rate): POST /admin/fault?errors=N fails N% of reads before
+	// any work happens, so the 500s cost nothing and the ratio is exactly N.
+	if faults.Hit(faults.ErrorRate()) {
+		http.Error(w, "injected fault", http.StatusInternalServerError)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
 	defer cancel()
 
@@ -274,6 +281,14 @@ func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
+	// Fault 5 (error rate). Ahead of the sleep below, so an injected 500 is
+	// fast and a slow request is a real one -- arming both faults at once then
+	// gives two separable populations rather than one smeared distribution.
+	if faults.Hit(faults.ErrorRate()) {
+		http.Error(w, "injected fault", http.StatusInternalServerError)
+		return
+	}
+
 	ctx := r.Context()
 
 	// Fault 4 (slow tail): POST /admin/fault?slow=N makes N% of reservations
