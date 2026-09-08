@@ -356,22 +356,6 @@ The runner injects the fault, drives load with k6, writes Grafana annotations at
 - **MTTD (visual)**: time until the anomaly is visible on the overview dashboard.
 - **MTTR diagnosis**: number of clicks and elapsed time to identify the *responsible service and operation* starting from the alert.
 
----
-
-## Results
-
-Measured over the scenarios in `experiments/`, comparing a metrics-only setup against the full correlated stack:
-
-| Scenario | Detection (alert) | Diagnosis, metrics only | Diagnosis, correlated stack |
-|---|---|---|---|
-| Inventory latency +800ms (30%) | ~45 s | ~6 min | **~40 s** (exemplar → trace → span) |
-| Orders 5xx error injection (10%) | ~30 s | ~4 min | **~25 s** (alert → trace → error log) |
-| PostgreSQL slow queries | ~60 s | ~8 min | **~1 min** (DB panel → slow trace → SQL span) |
-| Dependency hang (inventory down) | ~20 s | ~3 min | **~30 s** (service graph shows the broken edge) |
-
-The headline: detection time is driven by alert configuration and barely changes, but **diagnosis time drops by roughly an order of magnitude** once exemplars and `trace_id` links remove the need to manually correlate three separate tools.
-
-Full write-ups, with screenshots, are in `docs/experiments/`.
 
 ---
 
