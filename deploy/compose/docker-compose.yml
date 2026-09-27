@@ -142,6 +142,8 @@ services:
       GF_FEATURE_TOGGLES_ENABLE: traceToMetrics
     volumes:
       - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/ds.yaml:ro
+      - ./grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "3000:3000"
     depends_on:

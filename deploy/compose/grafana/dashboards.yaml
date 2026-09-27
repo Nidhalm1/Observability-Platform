@@ -1,0 +1,14 @@
+# Dashboard provider: loads every *.json under /var/lib/grafana/dashboards.
+# Mounted into /etc/grafana/provisioning/dashboards/ by docker-compose.yml.
+apiVersion: 1
+
+providers:
+  - name: files
+    folder: ""            # General folder
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true  # edits in the UI are allowed but lost on restart; export the JSON back to the repo
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true
