@@ -231,12 +231,14 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	var out OrderResponse
 	// status::text because pgx cannot scan a user-defined enum OID into a
 	// string on its own.
+	start := time.Now()
 	err = s.db.QueryRowContext(ctx,
 		`SELECT id, customer_id, status::text, total_cents, created_at
 		   FROM orders
 		  WHERE id = $1`,
 		id,
 	).Scan(&out.ID, &out.CustomerID, &out.Status, &out.TotalCents, &out.CreatedAt)
+	telemetry.ObserveDBQuery(ctx, "orders", "select_order", start)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "order not found", http.StatusNotFound)
@@ -270,6 +272,9 @@ func (s *server) loadItems(ctx context.Context, id int64) ([]Item, error) {
 // itemsOneQuery is the correct version: every row in a single round trip,
 // served by idx_order_items_order_id.
 func (s *server) itemsOneQuery(ctx context.Context, id int64) ([]Item, error) {
+	// Deferred so the timing covers reading every row, not just the first
+	// round trip that QueryContext waits for.
+	defer telemetry.ObserveDBQuery(ctx, "orders", "select_items", time.Now())
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT sku, qty, unit_price_cents
 		   FROM order_items
@@ -299,11 +304,13 @@ func (s *server) itemsOneQuery(ctx context.Context, id int64) ([]Item, error) {
 }
 //
 func (s *server) itemsNPlusOne(ctx context.Context, id int64) ([]Item, error) {
+	start := time.Now()
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id FROM order_items WHERE order_id = $1 ORDER BY id`,
 		id,
 	)
 	if err != nil {
+		telemetry.ObserveDBQuery(ctx, "orders", "select_items_n1", start)
 		return nil, err
 	}
 	var itemIDs []int64
@@ -320,15 +327,18 @@ func (s *server) itemsNPlusOne(ctx context.Context, id int64) ([]Item, error) {
 		return nil, err
 	}
 	rows.Close()
-	// for each id  we make one query 
+	telemetry.ObserveDBQuery(ctx, "orders", "select_items_n1", start)
+	// for each id  we make one query
 	out := make([]Item, 0, len(itemIDs))
 	for _, itemID := range itemIDs {
 		var it Item
 	
+		start := time.Now()
 		err := s.db.QueryRowContext(ctx,
 			`SELECT sku, qty, unit_price_cents FROM order_items WHERE id = $1`,
 			itemID,
 		).Scan(&it.SKU, &it.Qty, &it.Price)
+		telemetry.ObserveDBQuery(ctx, "orders", "select_items_n1", start)
 		if err != nil {
 			return nil, err
 		}
@@ -358,12 +368,14 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	insCtx, cancel := context.WithTimeout(ctx, dbTimeout)
 	var orderID int64
 	var createdAt time.Time
+	start := time.Now()
 	err = s.db.QueryRowContext(insCtx,
 		`INSERT INTO orders (customer_id, status)
 		 VALUES ($1, $2::order_status)
 		 RETURNING id, created_at`,
 		order.CustomerID, "pending",
 	).Scan(&orderID, &createdAt)
+	telemetry.ObserveDBQuery(ctx, "orders", "insert_order", start)
 	cancel()
 	if err != nil {
 		telemetry.LogWith(ctx).Error("insert order failed", "error", err)
@@ -387,7 +399,9 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	start = time.Now()
 	resp, err := s.client.Do(req)
+	telemetry.ObserveHTTPClient(ctx, "orders", "inventory", start)
 	if err != nil {
 		telemetry.LogWith(ctx).Error("call inventory failed", "error", err)
 		http.Error(w, "inventory service unavailable", http.StatusServiceUnavailable)
@@ -439,12 +453,14 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	// 'partially_confirmed'. A mismatch here is an invalid-input error from
 	// Postgres, i.e. a 500 on every partial order.
 	updCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+	start = time.Now()
 	_, err = s.db.ExecContext(updCtx,
 		`UPDATE orders
 		    SET status = $2::order_status, total_cents = $3, updated_at = now()
 		  WHERE id = $1`,
 		orderID, status, totalCents,
 	)
+	telemetry.ObserveDBQuery(ctx, "orders", "update_order", start)
 	cancel()
 	if err != nil {
 		telemetry.LogWith(ctx).Error("update order failed", "order_id", orderID, "error", err)
@@ -466,7 +482,9 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 		}
 
 		insertCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+		start = time.Now()
 		_, err = s.db.ExecContext(insertCtx, sb.String(), args...)
+		telemetry.ObserveDBQuery(ctx, "orders", "insert_items", start)
 		cancel()
 		if err != nil {
 			telemetry.LogWith(ctx).Error("insert items failed", "order_id", orderID, "error", err)

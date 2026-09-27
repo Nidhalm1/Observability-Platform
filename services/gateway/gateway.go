@@ -202,7 +202,9 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 //
 
 func (s *server) forward(w http.ResponseWriter, req *http.Request) {
+	start := time.Now()
 	resp, err := s.client.Do(req)
+	telemetry.ObserveHTTPClient(req.Context(), "gateway", "orders", start)
 	if err != nil {
 		telemetry.LogWith(req.Context()).Error("call orders failed", "url", req.URL.String(), "error", err)
 		http.Error(w, "orders service unavailable", http.StatusServiceUnavailable)

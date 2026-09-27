@@ -258,10 +258,12 @@ func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
 	// Index Scan normally, Seq Scan while Fault 1 is armed -- see skuQuery. The
 	// otelsql span around this call is what makes the difference visible in a
 	// trace rather than only in EXPLAIN.
+	start := time.Now()
 	err := s.db.QueryRowContext(ctx,
 		stockQuery.stmt(),
 		chi.URLParam(r, "sku"),
 	).Scan(&out.SKU, &out.Warehouse, &out.Quantity, &out.Reserved, &out.Price)
+	telemetry.ObserveDBQuery(ctx, "inventory", "select_stock", start)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		telemetry.LogWith(ctx).Warn("unknown sku", "sku", chi.URLParam(r, "sku"))
@@ -306,12 +308,14 @@ func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
 		var granted int
 		var price int
 		dbCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+		start := time.Now()
 		err := s.db.QueryRowContext(
 			dbCtx,
 			reserveQuery.stmt(),
 			item.SKU,
 			item.Qty,
 		).Scan(&granted, &price)
+		telemetry.ObserveDBQuery(ctx, "inventory", "reserve_stock", start)
 		cancel()
 
 		if err != nil {
