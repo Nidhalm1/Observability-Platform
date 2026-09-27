@@ -39,7 +39,7 @@ func SetupTracing(ctx context.Context, service string) (func(context.Context) er
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(0.5)), // sample ~50% of traces,// sample each trace can be store 
+		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(0.8)), // sample ~80% of traces,// sample each trace can be store 
 	) //
 	otel.SetTracerProvider(tp)
 

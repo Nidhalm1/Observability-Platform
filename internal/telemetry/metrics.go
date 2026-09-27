@@ -7,6 +7,7 @@
 package telemetry
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"runtime"
@@ -43,7 +44,57 @@ var (
 		},
 		[]string{"service", "method", "route"},
 	)
+
+	// Time spent inside the database, per logical operation. Compared against
+	// httpDuration it answers "is the slowness in my code or in Postgres?".
+	// `operation` is a fixed name chosen by the caller (e.g. "get_stock"),
+	// never the SQL text -- raw queries would explode cardinality.
+	dbQueryDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "db_query_duration_seconds",
+			Help:    "Database query latency.",
+			Buckets: []float64{.005, .01, .025, .05, .1, .2, .3, .5, 1, 2.5, 5, 10},
+		},
+		[]string{"service", "operation"},
+	)
+
+	// Outbound call latency as seen by the caller. The gap between this and
+	// the callee's own http_request_duration_seconds is network + queueing.
+	// `target` is the downstream service name, never a full URL.
+	httpClientDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_client_request_duration_seconds",
+			Help:    "Outbound HTTP request latency.",
+			Buckets: []float64{.005, .01, .025, .05, .1, .2, .3, .5, 1, 2.5, 5, 10},
+		},
+		[]string{"service", "target"},
+	)
 )
+
+// ObserveDBQuery records one database call. Usage:
+//
+//	start := time.Now()
+//	row := db.QueryRowContext(ctx, ...)
+//	telemetry.ObserveDBQuery(ctx, "inventory", "get_stock", start)
+func ObserveDBQuery(ctx context.Context, service, operation string, start time.Time) {
+	observe(ctx, dbQueryDuration.WithLabelValues(service, operation), time.Since(start).Seconds())
+}
+
+// ObserveHTTPClient records one outbound HTTP call to `target`.
+func ObserveHTTPClient(ctx context.Context, service, target string, start time.Time) {
+	observe(ctx, httpClientDuration.WithLabelValues(service, target), time.Since(start).Seconds())
+}
+
+// observe attaches the trace ID as an exemplar when the request is sampled,
+// same as the server-side histogram in Metrics.
+func observe(ctx context.Context, obs prometheus.Observer, elapsed float64) {
+	sc := trace.SpanContextFromContext(ctx)
+	if o, ok := obs.(prometheus.ExemplarObserver); ok && sc.IsSampled() {
+		o.ObserveWithExemplar(elapsed, prometheus.Labels{"trace_id": sc.TraceID().String()})
+		return
+	}
+	obs.Observe(elapsed)
+}
 
 func DBPoolMetrics(service string, db *sql.DB) error {
 	labels := prometheus.Labels{"service": service}

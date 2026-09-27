@@ -48,7 +48,7 @@ services:
       # Fault 3 (pool exhaustion). Read from the shell so the value can be
       # changed without editing this file:
       #   DB_MAX_OPEN_CONNS=3 docker compose up -d --force-recreate inventory
-      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-3}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-10}
     ports:
       - "5048:8080"
     depends_on:
@@ -70,7 +70,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       PORT: 8080
      
-      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-3}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-10}
       # Fault 4 (missing timeout). Off by default -- with it on, orders waits
       DISABLE_CLIENT_TIMEOUT: ${DISABLE_CLIENT_TIMEOUT:-false}
     ports:

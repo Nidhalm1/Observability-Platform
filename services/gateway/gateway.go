@@ -84,9 +84,6 @@ func main() {
 		},
 	}
 
-	// The gateway has no pool to report, but it does park a goroutine per
-	// in-flight call to orders -- so it needs the same gauge for a `by
-	// (service)` panel to cover the whole chain rather than two thirds of it.
 	if err := telemetry.GoroutineMetrics("gateway"); err != nil {
 		logger.Error("goroutine metrics registration failed", "error", err)
 		exitCode = 1
