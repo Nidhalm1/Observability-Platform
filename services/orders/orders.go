@@ -258,7 +258,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 // loadItems returns an order's line items, by whichever path Fault 2 selects.
@@ -504,7 +504,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(out)
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 //todo add a call when a client can cancel an order if not confirmed
