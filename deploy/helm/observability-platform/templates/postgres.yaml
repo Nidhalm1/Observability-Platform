@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Secret # stocker le mot de passe et url de postgress sql pour que les autres pod le lise
+metadata:
+  name: postgres
+  labels:
+    {{- include "obs.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  password: {{ .Values.postgres.password | quote }}
+  url: "postgres://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres:5432/{{ .Values.postgres.database }}?sslmode=disable"
+---
+# Les scripts SQL du dossier migrations/ sont exécutés une seule fois, au premier démarrage
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  labels:
+    {{- include "obs.labels" . | nindent 4 }}
+data:
+{{ (.Files.Glob "migrations/*.sql").AsConfig | indent 2 }}
+---
+apiVersion: v1 #service + staefulset pour les pods à etat et veuelemnt persistant
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+    {{- include "obs.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet #lance le Pod PostgreSQL et le recrée s’il tombe.
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+    {{- include "obs.labels" . | nindent 4 }}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres
+                  key: password
+            - name: PGDATA                  # sous-dossier : un disque EBS neuf contient déjà "lost+found"
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              # -h 127.0.0.1 force le TCP : pendant l'initialisation, Postgres n'écoute que sur le socket local
+              command: ["sh", "-c", "pg_isready -h 127.0.0.1 -U {{ .Values.postgres.user }} -d {{ .Values.postgres.database }}"]
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: init
+          configMap:
+            name: postgres-init
+  volumeClaimTemplates: #crée le disque persistant pour PostgreSQL. pr si pod redemmare alors c bon
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.postgres.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}

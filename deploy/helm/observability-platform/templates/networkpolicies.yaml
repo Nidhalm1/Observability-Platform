@@ -1,0 +1,43 @@
+{{- if .Values.networkPolicies.enabled }}
+# 1) Par défaut : AUCUN pod du namespace n'accepte de trafic entrant
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {} #tous les Pods refusent par défaut le trafic entrant.
+  policyTypes: [Ingress]
+---
+# 2) La passerelle est le point d'entrée : elle accepte tout le monde
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway #seuelement pr gatway on autorise toutes les sources exterieux ou autres pods 
+  policyTypes: [Ingress] #qui peut entrer 
+  ingress: #tt le monde
+    - {}
+{{- /* 3) Pour les autres : seuls les appelants listés dans values.yaml sont autorisés */}}
+{{- range $target, $sources := .Values.networkPolicies.allow }} #lit values et ecrit les reglres 
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-{{ $target }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $target }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- range $sources }}
+        - podSelector:
+            matchLabels:
+              app: {{ . }}
+        {{- end }}
+{{- end }}
+{{- end }}

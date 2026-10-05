@@ -1,0 +1,57 @@
+{{- if .Values.backup.enabled }} 
+#se connexte au pod puis lui demande ses donne et les ecrire dans un espcae
+#exporte postgres vers un volum partagé par deux conatiners  puis un deuxiemen container lis ce volum et exporte vers s3 qui lui pas attaché à un pod ou autre mais dans le cloud
+# IRSA : ce compte de service est lié à un rôle IAM qui n'a QU'UN droit :
+# écrire dans s3://<bucket>/backups/. Aucune clé AWS n'est stockée dans le cluster.
+apiVersion: v1
+kind: ServiceAccount #cree une idente avec un role pour pourvoir ecrire dans S3
+metadata:
+  name: db-backup
+  annotations:
+    eks.amazonaws.com/role-arn: {{ required "backup.roleArn est obligatoire" .Values.backup.roleArn }}
+---
+apiVersion: batch/v1
+kind: CronJob # pr lancer automaotiquement un job / un pod à cerrtain heure pour expostre postgres vers s3
+metadata:
+  name: db-backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: db-backup        # nécessaire pour être autorisé par la NetworkPolicy de postgres
+        spec:
+          serviceAccountName: db-backup #ce pod optien l'identié pour cree dans le s3
+          restartPolicy: Never
+          volumes:
+            - name: dump
+              emptyDir: {}
+          initContainers:
+            # étape 1 : exporter la base dans un fichier
+            - name: pg-dump
+              image: postgres:16
+              command: ["sh", "-c", "pg_dump -h postgres -U {{ .Values.postgres.user }} {{ .Values.postgres.database }} > /dump/obs.sql"]
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres
+                      key: password
+              volumeMounts:
+                - name: dump
+                  mountPath: /dump
+          containers:
+            # étape 2 : envoyer le fichier sur S3 avec les droits du rôle IAM (IRSA)
+            - name: upload
+              image: amazon/aws-cli:latest
+              command: ["sh", "-c", "aws s3 cp /dump/obs.sql s3://{{ required "backup.bucket est obligatoire" .Values.backup.bucket }}/backups/obs-$(date +%Y%m%d-%H%M%S).sql"]
+              env:
+                - name: AWS_REGION
+                  value: {{ .Values.backup.region | quote }}
+              volumeMounts:
+                - name: dump
+                  mountPath: /dump
+{{- end }}

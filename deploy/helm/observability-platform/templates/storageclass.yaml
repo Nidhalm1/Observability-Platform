@@ -1,0 +1,15 @@
+# les regles de comment cree le disuqe il sera cree par l'etape de postgres.yaml
+#ssd par le driver cree parr le driver ebs.csi.aws.com ect
+{{- if .Values.storageClass.createGp3 }}
+# Disque EBS gp3 pour PostgreSQL sur EKS (fourni par le driver EBS CSI)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+volumeBindingMode: WaitForFirstConsumer
+#si  supprimes le volume PersistentVolumeClaim de postgress , le disque EBS AWS associé sera aussi supprimé.
+reclaimPolicy: Delete
+{{- end }}

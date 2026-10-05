@@ -1,0 +1,12 @@
+# Spécifique à AWS EKS (à utiliser AVEC values-ghcr.yaml)
+# Remplace 123456789012 par ton numéro de compte AWS (2 endroits ci-dessous).
+postgres:
+  storageClass: gp3 #postgres stocke ses info dans ssd gp3 
+
+storageClass:
+  createGp3: true #creer le ssd 
+
+backup:
+  enabled: true #si pod postgres est down et remplacé alors ca garde pareil
+  bucket: obs-platform-backups-012875039067               # stocke ces backup dans s3
+  roleArn: arn:aws:iam::012875039067:role/obs-db-backup    # rôle créé par eksctl pour stoker buckep

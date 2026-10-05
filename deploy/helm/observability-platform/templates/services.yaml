@@ -1,0 +1,94 @@
+{{- /* Une boucle = un Deployment + un Service pour chacun des 3 microservices */}}
+{{- range $name, $svc := .Values.services }} # ce etemplate + values  apres helm pour transfermer vers yaml comprenhsible par kubernetes 
+---
+apiVersion: apps/v1
+kind: Deployment #creee le deployment 
+metadata: #meta du deployment
+  name: {{ $name }} #order pour orders , gaetway pour gatway ct chacun ses services 
+  labels:
+    app: {{ $name }}
+    {{- include "obs.labels" $ | nindent 4 }} #ajoute aussi le label du fichier helper on disant  observablity platform ect
+spec:
+  replicas: {{ $.Values.replicas }} #nb de replicas defini dans value.yaml
+  selector:
+    matchLabels:
+      app: {{ $name }} #ce deploimùent gere les pod avec label name qui vaut order ou gatwaty ou ect 
+  template:
+    metadata:
+      labels: #meta du chaque pod donc name = orders ou .. et en haut matchlabs  name donc deplyment name = pod name 
+        app: {{ $name }}
+    spec:
+      automountServiceAccountToken: false   # le pod n'a pas besoin de parler à l'API Kubernetes pour reconfiguer
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532                    # utilisateur "nonroot" de l'image distroless
+        seccompProfile: #securité sup pour limiter le container ce que p faire 
+          type: RuntimeDefault
+      {{- if $svc.database }} # si le serviec  database = false alors saute ca 
+      initContainers:
+        # attend que PostgreSQL réponde avant de démarrer le pod car postgres est comme un pod aussi mais perssistant 
+        - name: wait-for-postgres
+          image: postgres:16
+          command: ["sh", "-c", "until pg_isready -h postgres -U {{ $.Values.postgres.user }}; do sleep 2; done"]
+      {{- end }}
+      containers: #containers dans le pod 
+        - name: {{ $name }} 
+          image: "{{ $.Values.image.prefix }}-{{ $name }}:{{ $.Values.image.tag }}" #par defaut ca prend de value mais si values-ghcr exist ca ecrase et prend de ced ernier 
+          imagePullPolicy: {{ $.Values.image.pullPolicy }} #télécharge l'image uniquement si elle n'est pas déjà présente. dans la machine ou les  pods s'excutes 
+          ports:
+            - name: http
+              containerPort: 8080
+          env: # au programme utilise ces varibale d'environnement
+            - name: PORT
+              value: "8080"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+            {{- if $svc.database }} #Seulement pour orders et inventory.
+            - name: DATABASE_URL #pour eviter de donner l'url come docker compose plutot de  chercher dans Secret Kubernetes
+              valueFrom:
+                secretKeyRef:
+                  name: postgres
+                  key: url
+            {{- end }}
+            {{- range $key, $value := $svc.env }} #ajouter aussi les varaible d'env pour chaque service comem       ORDERS_SERVICE_URL: http://orders:8080
+ 
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          readinessProbe:          # prêt à recevoir du trafic ? kubernetes va appler http://<pod>:8080/metrics dans le code j'ai http.Handle("/metrics", promhttp.Handler())
+            httpGet: # si pas pret n'envoie pas de traffic à ce pod 
+              path: /metrics
+              port: http
+            periodSeconds: 5
+          livenessProbe:           # toujours vivant ? sinon Kubernetes redémarre le conteneur , test si  http.ListenAndServe(":8080", nil) fonctionne  sans route
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources: #resources pr chaque container dans le pod
+            requests:
+              cpu: 50m 
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:         # moindre privilège au niveau du conteneur
+            allowPrivilegeEscalation: false #Le programme ne peut pas essayer d'obtenir plus de privilèges.
+            readOnlyRootFilesystem: true
+            capabilities: #Le système de fichiers principal du container est en lecture seule.
+              drop: ["ALL"]
+---
+apiVersion: v1 #creation du service pr chaque gatewoay , orders  ect 
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    {{- include "obs.labels" $ | nindent 4 }}
+spec: #selectionner les bons port pour ce service
+  selector:
+    app: {{ $name }}
+  ports:
+    - name: http
+      port: 8080 #port du service
+      targetPort:  http #envoie a un qui s'appel http du meme label donc peu importe leurs port 
+{{- end }}

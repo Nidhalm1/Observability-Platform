@@ -1,0 +1,6 @@
+# Images publiées par GitHub Actions sur GitHub Container Registry (ghcr.io).
+# La CI remplace automatiquement le tag par le SHA du dernier commit (GitOps).
+image:
+  prefix: ghcr.io/nidhalm1/obs #dis à kubernets d'aller chercher l'image ici
+  tag: latest
+  pullPolicy: IfNotPresent

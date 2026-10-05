@@ -1,0 +1,90 @@
+name: CI/CD
+
+on:
+  push: #a chaque push ou pull request
+    branches: [main]
+  pull_request:
+
+permissions: #git hub actions a le droit de seulment lire mon depot
+  contents: read
+
+jobs:
+  # 1) À chaque push ou pull request : le code compile, passe les contrôles, le chart est valide
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 #recuper mon code vers la machine ubuntu
+      - uses: actions/setup-go@v5 #installer go
+        with:
+          go-version-file: go.mod
+      - name: Compiler #verifer que tt les programm compile
+        run: go build ./...
+      - name: Analyse statique (go vet) #analyse en plus pour verifer des erreurs supplementaire 
+        run: go vet ./...
+      - name: Linter (golangci-lint)
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+      - uses: azure/setup-helm@v4 #installer helm
+      - name: Vérifier le chart Helm
+        run: > #est ce que mon helm chart est valide prend values par defaut  mas plus ca 
+          helm lint deploy/helm/observability-platform
+          -f deploy/helm/observability-platform/values-ghcr.yaml
+          -f deploy/helm/observability-platform/values-eks.yaml
+
+  # 2) Sur main uniquement : construire, scanner, puis publier les 3 images
+  images:
+    needs: test #images ne commence que si test a réussi.
+    if: github.event_name == 'push' #construire/publier les images seulement lors d'un push.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read #seueelement lire 
+      packages: write          # autorise la publication sur ghcr.io
+    strategy:
+      matrix:
+        service: [gateway, orders, inventory]
+    steps:
+      - uses: actions/checkout@v4 #recuperer le code
+      - uses: docker/setup-buildx-action@v3 # pr construire image docker 
+      - uses: docker/login-action@v3 #7. Connexion à GHCR
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }} #utilsiateur temporaire 
+          password: ${{ secrets.GITHUB_TOKEN }}   # jeton temporaire fourni par GitHub, aucune clé à gérer
+      - name: Construire l'image
+        uses: docker/build-push-action@v6 #regarde le docker file qui va buile puis publier les images dans ghcr
+        with:
+          context: .
+          build-args: SERVICE=${{ matrix.service }}
+          load: true #apres avori construit l'image charge la sur docker 
+          tags: | #le commit puis latest
+            ghcr.io/nidhalm1/obs-${{ matrix.service }}:${{ github.sha }}  
+            ghcr.io/nidhalm1/obs-${{ matrix.service }}:latest
+      - name: Scanner les failles (Trivy) #trivy pour les faille dans les images 
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/nidhalm1/obs-${{ matrix.service }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"          # une faille grave bloque la publication
+      - name: Publier l'image
+        run: docker push --all-tags ghcr.io/nidhalm1/obs-${{ matrix.service }}
+        #partage l'image sur GHCR 
+
+  # 3) GitOps : écrire dans Git la version à déployer. Argo CD la lit et l'applique.
+  gitops:
+    needs: images
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # le droit de modifier mon repostory
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mettre à jour le tag d'image dans values-ghcr.yaml
+        run: |
+          sed -i "s/^  tag: .*/  tag: \"${GITHUB_SHA}\"/" deploy/helm/observability-platform/values-ghcr.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "deploy: images ${GITHUB_SHA::7} [skip ci]" 
+          git push
+  # skip le ci

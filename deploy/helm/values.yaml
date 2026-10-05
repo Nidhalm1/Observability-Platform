@@ -1,0 +1,53 @@
+# Valeurs par défaut. Chaque environnement les surcharge avec son propre fichier :
+#   kind (local) : values-local.yaml
+#   EKS (AWS)    : values-ghcr.yaml + values-eks.yaml
+
+image:
+  prefix: obs          # nom final de l'image : <prefix>-<service>:<tag>  ex. obs-orders:dev
+  tag: dev
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+# Les 3 microservices. "database: true" = le service reçoit DATABASE_URL.
+services:
+  gateway:
+    database: false
+    env:
+      ORDERS_SERVICE_URL: http://orders:8080
+  orders:
+    database: true
+    env:
+      INVENTORY_SERVICE_URL: http://inventory:8080
+      DISABLE_CLIENT_TIMEOUT: "false"   # panne 4
+  inventory:
+    database: true
+    env: {}
+
+postgres:
+  user: obs
+  password: obs        # mot de passe de démo ; en production : AWS Secrets Manager
+  database: obs
+  storage: 1Gi
+  storageClass: ""     # vide = classe de stockage par défaut du cluster
+
+# Zero Trust : par défaut aucun pod n'accepte de trafic,
+# puis on autorise seulement les appels nécessaires (cible: [appelants]).
+networkPolicies:
+  enabled: true
+  allow:
+    orders: [gateway]
+    inventory: [orders]
+    postgres: [orders, inventory, db-backup]
+    otel-collector: [gateway, orders, inventory]
+
+# Sauvegarde quotidienne de la base vers S3 avec IRSA (EKS uniquement)
+backup:
+  enabled: false
+  bucket: ""
+  roleArn: ""
+  region: eu-west-3
+  schedule: "0 3 * * *"
+
+storageClass:
+  createGp3: false     # EKS uniquement : disque EBS gp3 pour PostgreSQL

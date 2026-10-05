@@ -1,0 +1,44 @@
+# Cluster EKS décrit dans un fichier versionné (Infrastructure as Code).
+# Création :    eksctl create cluster -f deploy/eks/cluster.yaml
+# Suppression : eksctl delete cluster -f deploy/eks/cluster.yaml
+# Remplace 123456789012 par ton numéro de compte AWS.
+
+# cree le cluster dans aws dans quel regiosn et deux instance aws ect
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: obs-platform
+  region: eu-west-3            # Paris
+
+iam:
+  withOIDC: true               # active IRSA : un pod peut recevoir un rôle IAM, sans clé AWS
+  serviceAccounts:
+    - metadata:
+        name: db-backup
+        namespace: observability
+      roleOnly: true           # eksctl crée seulement le rôle ; le ServiceAccount vient du chart Helm
+      roleName: obs-db-backup
+      attachPolicy:            # moindre privilège : un seul droit, sur un seul dossier
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ["s3:PutObject"]
+            Resource: "arn:aws:s3:::obs-platform-backups-123456789012/backups/*"
+
+addons:
+  - name: vpc-cni
+    configurationValues: '{"enableNetworkPolicy": "true"}'   # fait respecter les NetworkPolicies
+  - name: coredns
+  - name: kube-proxy
+  - name: aws-ebs-csi-driver
+    wellKnownPolicies:
+      ebsCSIController: true   # le driver de disques EBS reçoit lui aussi son propre rôle (IRSA)
+
+managedNodeGroups:
+  - name: workers
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 2
+    volumeSize: 20
