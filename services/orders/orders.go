@@ -128,7 +128,7 @@ func main() {
 		exitCode = 1
 		return
 	}
-	defer s.db.Close()
+	defer func() { _ = s.db.Close() }()
 
 	// Fault 3 (pool exhaustion) is set here, not on /admin/fault: the pool size
 	
@@ -285,7 +285,7 @@ func (s *server) itemsOneQuery(ctx context.Context, id int64) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := []Item{} // not nil: encodes as [] rather than null
 	for rows.Next() {
@@ -317,16 +317,16 @@ func (s *server) itemsNPlusOne(ctx context.Context, id int64) ([]Item, error) {
 	for rows.Next() {
 		var itemID int64
 		if err := rows.Scan(&itemID); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		itemIDs = append(itemIDs, itemID)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, err
 	}
-	rows.Close()
+	_ = rows.Close()
 	telemetry.ObserveDBQuery(ctx, "orders", "select_items_n1", start)
 	// for each id  we make one query
 	out := make([]Item, 0, len(itemIDs))
@@ -407,7 +407,7 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "inventory service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close() // AFTER the err check: on error resp is nil -> panic
+	defer func() { _ = resp.Body.Close() }() // AFTER the err check: on error resp is nil -> panic
 
 	var inventoryResponse OrderRequest
 	if err := json.NewDecoder(resp.Body).Decode(&inventoryResponse); err != nil {

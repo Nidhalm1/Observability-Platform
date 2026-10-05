@@ -148,7 +148,7 @@ func main() {
 		exitCode = 1
 		return
 	}
-	defer s.db.Close()
+	defer func() { _ = s.db.Close() }()
 
 	// Fault 3 (pool exhaustion) is set here, not on /admin/fault: the pool size
 
@@ -277,7 +277,7 @@ func (s *server) getStock(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (s *server) checkOrder(w http.ResponseWriter, r *http.Request) {
@@ -344,5 +344,5 @@ func (s *server) sendOrder(w http.ResponseWriter, order OrderRequest) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
-	json.NewEncoder(w).Encode(order)
+	_ = json.NewEncoder(w).Encode(order)
 }

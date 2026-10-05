@@ -210,11 +210,11 @@ func (s *server) forward(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "orders service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close() // AFTER the err check: on error resp is nil -> panic
+	defer func() { _ = resp.Body.Close() }() // AFTER the err check: on error resp is nil -> panic
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func verify(order OrderRequest) bool {

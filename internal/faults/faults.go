@@ -35,12 +35,18 @@ func Handler() http.HandlerFunc {
 		q := r.URL.Query()
 		if v := q.Get("errors"); v != "" {
 			var n int64
-			json.Unmarshal([]byte(v), &n)
+			if err := json.Unmarshal([]byte(v), &n); err != nil {
+				http.Error(w, "invalid errors value", http.StatusBadRequest)
+				return
+			}
 			errorRate.Store(n)
 		}
 		if v := q.Get("slow"); v != "" {
 			var n int64
-			json.Unmarshal([]byte(v), &n)
+			if err := json.Unmarshal([]byte(v), &n); err != nil {
+				http.Error(w, "invalid slow value", http.StatusBadRequest)
+				return
+			}
 			slowRate.Store(n)
 		}
 		if v := q.Get("n1"); v != "" {
@@ -49,7 +55,7 @@ func Handler() http.HandlerFunc {
 		if v := q.Get("noindex"); v != "" {
 			noIndex.Store(v == "true" || v == "1")
 		}
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"errors": errorRate.Load(), "slow": slowRate.Load(),
 			"n1": n1.Load(), "noindex": noIndex.Load(),
 		})
