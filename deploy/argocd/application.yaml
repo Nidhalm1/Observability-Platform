@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability-platform
+  namespace: argocd                  # là où Argo CD est installé
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Nidhalm1/Observability-Platform.git
+    targetRevision: main
+    path: deploy/helm/observability-platform
+    helm:
+      valueFiles:
+        - values-ghcr.yaml           # contient le tag mis à jour par le CI
+        - values-eks.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability         # le même que dans ton README
+  syncPolicy:
+    automated:
+      prune: true                    # supprime ce qui n'est plus dans Git
+      selfHeal: true                 # annule les changements faits à la main
+    syncOptions:
+      - CreateNamespace=true
